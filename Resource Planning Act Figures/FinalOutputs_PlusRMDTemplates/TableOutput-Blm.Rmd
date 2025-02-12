@@ -1,0 +1,124 @@
+---
+title: "Table Output- BLM Wide"
+date: "4/16/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r prep the data, echo = FALSE, include = FALSE}
+## Sage Grouse Indicators by State by Type
+date <- Sys.Date()
+library(tidyverse)
+library(ggplot2)
+library(gt)
+
+#this file has 2012 values replaced with year 2013 since the surveys actually took place in 2013
+StateType <- read.csv(file = "C:/Users/rburke/Documents/Projects/LMF_DataWrangling/GetTidy/EstimatesBLMByType_2012_2019_withlabels.csv", stringsAsFactors = FALSE)
+StateType$Year <- gsub("2012" , "2013", StateType$Year)
+
+
+StateType$Type <- gsub("1" , "I", StateType$Type)
+StateType$Type <- gsub("2" , "II", StateType$Type)
+
+head(StateType)
+
+##Read in NResp table for sub-sample info
+
+NResp <- read.csv(file = "C:/Users/rburke/Documents/Projects/LMF_DataWrangling/GetTidy/NumberResponses_BLM_CatVariables.csv")
+NResp$Type <- gsub("1" , "I", NResp$Type)
+NResp$Type <- gsub("2" , "II", NResp$Type)
+NResp$Year <- gsub("2012" , "2013", NResp$Year)
+NResp <- NResp %>% rename(Indicator_Name = Indicator_name)
+#Merge with dataset
+NResp$Year <- as.integer(as.character(NResp$Year))
+
+NResp <- NResp %>% rename(Indicator_Number = Indicator)
+NResp$State <- as.character(as.factor(NResp$State))
+StateType <- merge(StateType, NResp, by = c("Indicator_Number", "State", "Type", "Year"), all = TRUE)
+
+StateType_Subset <- StateType %>% mutate(Plus = CI_Upper - Value, Minus = Value - CI_Lower) %>% subset(Indicator_Number == 16 | Indicator_Number == 17 | Indicator_Number >= 26) %>% subset(!var_type == "acres") %>% filter(!grepl("intercanopy", figure_title_edit))
+
+
+StateType_Subset_spread <- StateType_Subset %>% select(State, Type, Year, figure_title_edit, Value, Plus, Minus, NResp) %>% filter(!grepl("rangeland health", figure_title_edit))
+
+Table1 <- StateType_Subset_spread %>% 
+  mutate_if(is.numeric, ~round(., 0)) %>% 
+  filter(!grepl("inches", figure_title_edit)) %>% mutate(TableFill =       paste(Value, "% ", sep = "")) 
+
+Table2 <- StateType_Subset_spread %>% mutate_if(is.numeric, ~round(., 2)) %>% filter(grepl("inches", figure_title_edit)) %>% mutate(TableFill = paste(Value, " inches ", sep = ""))
+
+TableMerge <- rbind(Table1, Table2)
+
+Table <-TableMerge %>% mutate(TableFill2 = paste(TableFill, "(+", Plus, "/-", Minus, ")", sep = ""))
+
+Table <- Table %>% select(figure_title_edit, State, Type, Year, TableFill2, NResp)
+
+
+## Joining with sample size
+
+SampleSize <- read.csv("C:/Users/rburke/Documents/Projects/LMF_DataWrangling/GetTidy/SampleSizeByBLM_Year.csv", stringsAsFactors = FALSE)
+SampleSize <- SampleSize %>% unique()
+SampleSize$Year <- gsub("2012", "2013", SampleSize$Year)
+SampleSize <- SampleSize %>% filter(!is.na(Type))
+Table <- Table %>% filter(!is.na(Type))
+Table <- merge(Table, SampleSize, by = c("Year", "Type"))
+Table <- Table %>% rename(State = State.y)
+
+write.csv(Table, file = "C:/Users/rburke/Documents/Projects/LMF_DataWrangling/GetTidy/SampleSizeTable_BLMType_2012_2019.csv")
+
+Table_spread <- Table %>% mutate(TableFill3 = 
+                          paste(BLM.Sample, TableFill2, sep = ": ")) %>%          select(State, Year, Type, TableFill3, figure_title_edit, NResp) 
+  
+Table_spread <- Table_spread %>% separate(TableFill3, into = c("Sample Size", "Value (w/ 80% Confidence Interval)"), sep = ": ") %>%
+              select("Year", "State", "Type" ,"Value (w/ 80% Confidence Interval)", "Sample Size", "NResp", "figure_title_edit")
+
+# Splitting out the tables that have subsample
+
+Table_spread_cont <- Table_spread %>% filter(is.na(NResp)) %>% select(-NResp)
+
+Table_spread_cat <- Table_spread %>% filter(!is.na(NResp)) %>%
+                    rename("Number of plots meeting this criteria" = NResp)
+
+Table_spread_cat <- Table_spread_cat %>% mutate(Sample = paste(`Sample Size`, " (" , `Number of plots meeting this criteria`, ")", sep = "")) %>% select(-`Sample Size`) %>% rename("Sample Size" = Sample) %>%
+       select(Year, State, Type, "Value (w/ 80% Confidence Interval)", 
+              figure_title_edit, 
+              "Sample Size")
+
+Table_spread_cont <- Table_spread_cont %>% select(Year, State, Type, "Value (w/ 80% Confidence Interval)", 
+               figure_title_edit, 
+              "Sample Size")
+Table_spread <- rbind(Table_spread_cat, Table_spread_cont)
+
+#   
+# mutate(Year_State = paste(State, Year, sep = ": ")) %>% select(figure_title_edit, State, Type, Year_State, TableFill2)
+## Subset for each state- or loop?! 
+
+
+Tables <- lapply(X = split(Table_spread, list(Table_spread$State)), FUN = function(Table_spread){
+         current_table <- Table_spread %>% gt(rowname_col = "Year", groupname_col = "figure_title_edit") %>%  
+           tab_stubhead(label = "Year") %>%
+           tab_footnote(
+    footnote = "Value in () indicates number of plots meeting specified   criteria for benchmarked indicators",
+    locations = cells_column_labels(
+      columns = vars('Sample Size'))
+  )
+
+         return(current_table)
+})
+
+
+
+
+```
+
+### BLM-Wide
+```{r print tables, echo = FALSE, include = TRUE}
+
+Tables[["BLM"]]
+
+
+```

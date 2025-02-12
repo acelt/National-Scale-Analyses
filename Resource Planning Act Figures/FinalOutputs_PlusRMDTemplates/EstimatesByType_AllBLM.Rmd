@@ -1,0 +1,595 @@
+---
+title: "Landscape Monitoring Framework Estimates By State By Type: BLM Rangelands West-Wide"
+date: "4/16/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 
+
+```{r prep the data, echo = FALSE, include = FALSE}
+## Sage Grouse Indicators by State by Type
+
+library(tidyverse)
+library(ggplot2)
+
+#this file has 2012 values replaced with year 2013 since the surveys actually took place in 2013
+StateType <- read.csv(file = "C:/Users/rburke/Documents/Projects/LMF_DataWrangling/GetTidy/EstimatesBLMByType_2012_2019_withlabels.csv", stringsAsFactors = FALSE)
+
+
+StateType[["Type"]][is.na(StateType[["Type"]])] <- "Overall"
+StateType$Type <- gsub("1" , "I", StateType$Type)
+StateType$Type <- gsub("2" , "II", StateType$Type)
+#R is not reading numbers as numeric...fixing
+#StateType_na <- StateType %>% filter(is.na(Value))
+#corrected_strings <- gsub(StateType[["Value"]], pattern = "\\D", replacement = ".")
+
+
+StateType_Subset <- StateType %>% mutate(Plus = CI_Upper - Value, Minus = Value - CI_Lower) 
+
+write.csv(StateType_Subset, file = "Estimates_BLMByType_WithTableValues.csv", row.names = FALSE)
+
+# Replace 2012 with 2013 because the sampling was actually in 2013
+StateType$Year <- gsub("2012" , "2013", StateType$Year)
+# StateType$Year <- as.numeric(as.character(StateType$Year))
+
+#Subset to state of interest
+#StateType <- StateType %>% filter(!is.na(Type)) %>% subset(State == "WY")
+
+Type_Names <- c("1" = "Type I" , "2" = "Type II", "Overall" = "Overall")
+
+str(StateType)
+
+StateType$Value <- as.numeric(as.character(StateType$Value))
+StateType$SE <- as.numeric(as.character(StateType$SE))
+StateType$CV <- as.numeric(as.character(StateType$CV))
+StateType$CI_Lower <- as.numeric(as.character(StateType$CI_Lower))
+StateType$CI_Upper <- as.numeric(as.character(StateType$CI_Upper))
+
+#Pull the max value of acres for plot scale
+#Put acres in millions
+
+StateType <- mutate(StateType, Value2 = ifelse(var_type == "acres", Value/1000000, Value)) %>% 
+             mutate(CI_Lower2 = ifelse(var_type == "acres", CI_Lower/1000000, CI_Lower)) %>% 
+             mutate(CI_Upper2 = ifelse(var_type == "acres", CI_Upper/1000000, CI_Upper))
+
+
+Max_acres <- StateType %>% subset(var_type == "acres") %>% summarize(max(CI_Upper2)) %>% round(digits = 2)
+
+Max_acres <- Max_acres$`max(CI_Upper2)` 
+
+
+#Max_inches <- StateType %>% subset(var_type == "inches") %>% summarize(max(CI_Upper2)) %>% round(digits = 2)
+
+#Max_inches <- Max_inches$`max(CI_Upper2)` + 0.5
+
+#Grabbing Max Inches from other doc instead to keep consistent
+
+Max_inches <- 68.16
+
+#StateType[["Value"]] <- trimws(StateType[["Value"]])
+
+
+# Split the title into 2 lines for labelling
+
+#StateType <- StateType %>% mutate(figure_title_caption = figure_title)
+
+StateName <- c("AZ" = "Arizona", "CA" = "California", "CO" = "Colorado" , "ID" = "Idaho" , 
+               "MT" = "Montana", "ND" = "North Dakota", "NM" = "New Mexico" , "NV" = "Nevada",
+               "OR" = "Oregon", "SD" = "South Dakota", "UT" = "Utah", "WA" = "Washington", 
+               "WY" = "Wyoming", "BLM" = "BLM Rangelands West-Wide")
+
+str(StateType)
+StateType$Year <- as.numeric(as.character(StateType$Year))
+
+#Remove overall estimate and remove 2011 because it's not available across the dataset
+StateType_TypeOnly <- StateType %>% subset(Type == "I" | Type == "II") %>% filter(!Year == "2011")
+unique(StateType_TypeOnly$Indicator_Name) %>% unique()
+
+StateType_TypeOnly_CIFix <- StateType_TypeOnly %>% filter(Year == "2013" & Indicator_Name == "67. Mean Sagebrush Species Height in Inches on BLM range")
+
+list_of_plots <- lapply(X = split(StateType_TypeOnly, StateType_TypeOnly[["Index"]]), FUN = function(StateType_TypeOnly){
+
+  current_plot <- ggplot(StateType_TypeOnly, aes(x = Year, y = Value2, fill = Type, group = Type)) +
+                  geom_point(aes(x = Year , 
+                  y = Value2, shape = Type, fill = Type), position = position_dodge2(.5), size = 2) + 
+                  labs(x = StateType_TypeOnly$xlab , y = StateType_TypeOnly$ylab, fig.caption = StateType_TypeOnly$caption) +
+                  theme(plot.caption = element_text(hjust=0.5, size=rel(1.2), face = "bold.italic")) + 
+                  scale_fill_discrete(name = "Type", labels = c("I", "II")) + 
+                  scale_x_continuous(breaks = scales::pretty_breaks(n = length(unique(StateType_TypeOnly$Year + 1)))) + 
+                  geom_errorbar(aes(x = Year , ymin = CI_Lower2, ymax = CI_Upper2, fill = Type) , width = 0.2, position = position_dodge(.5)) +  
+                  scale_shape_manual(values = c(16,17)) + 
+                  guides(size = "none", color = "none", fill = "none") + 
+                  facet_grid(cols = vars(State), labeller = labeller(State = StateName)) + 
+                  theme(strip.text.x = element_text(size = 10 , color = "black" , face = "bold") ,
+                  plot.caption = element_text(face = "italic", size = "8", hjust = 0), 
+                  plot.subtitle = element_text(face = "italic", size = "8", hjust = 0), 
+                  panel.background = element_rect(fill = "white") , panel.grid = element_line(color = "grey") ,
+                  panel.grid.minor = element_blank() , panel.grid.major.x = element_line(color = "grey95")) +
+    
+                  if(StateType_TypeOnly$var_type == "percent"){scale_y_continuous(limits = c(0 , 100))} 
+                  else if(StateType_TypeOnly$var_type == "acres"){scale_y_continuous(limits = c(0, Max_acres))} 
+                  else if(StateType_TypeOnly$var_type == "inches"){scale_y_continuous(limits = c(0 , Max_inches))}
+   
+   return(current_plot)
+  
+})
+
+    # if(StateType_TypeOnly$Indicator_Number.x < "27"){scale_x_continuous(breaks = scales::pretty_breaks(n = 8))}
+    # else if(StateType_TypeOnly$Indicator_Number.x >= "27"){scale_x_continuous(breaks = scales::pretty_breaks(n = 6))}
+
+## Removing title for formatting issues
+# Will embed in doc
+# title =  paste("Figure ", StateType$Index, ":", StateType$figure_title), face = "italic"
+
+```
+
+#### ***Figure 1: Proportion of BLM rangelands with none-to-slight or slight-to-moderate departure from biotic integrity reference conditions (BI <=2) (80% confidence interval)*** 
+
+```{r fig 1, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["1"]]
+
+```
+
+
+#### ***Figure 2: BLM rangeland acres with none-to-slight or slight-to-moderate departure from biotic integrity reference conditions (BI <=2) (80% confidence interval)*** 
+
+```{r fig 2, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["2"]]
+
+```
+
+#### ***Figure 3: Proportion of BLM rangelands with moderate departure from biotic integrity reference conditions (BI = 3) (80% confidence interval)*** 
+
+```{r fig 3, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["3"]]
+
+```
+
+#### ***Figure 4: BLM rangeland acres with moderate departure from biotic integrity reference conditions (BI = 3) (80% confidence interval)*** 
+
+```{r fig 4, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["4"]]
+
+```
+
+#### ***Figure 5: Proportion of BLM rangelands with moderate or moderate-to-extreme or extreme-to-total departure from biotic integrity reference conditions (BI >=3) (80% confidence interval)*** 
+
+```{r fig 5, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["5"]]
+
+```
+
+#### ***Figure 6: BLM rangeland acres with moderate or moderate-to-extreme or extreme-to-total departure from biotic integrity reference conditions (BI >=3) (80% confidence interval)*** 
+
+```{r fig 6, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["6"]]
+
+```
+
+#### ***Figure 7: Proportion of BLM rangelands with moderate-to-extreme or extreme-to-total departure from biotic integrity reference conditions (BI >= 4) (80% confidence interval)*** 
+
+```{r fig 7, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["7"]]
+
+```
+
+#### ***Figure 8: BLM rangeland acres with moderate-to-extreme or extreme-to-total departure from biotic integrity reference conditions (BI >= 4) (80% confidence interval)*** 
+
+```{r fig 8, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["8"]]
+
+```
+
+#### ***Figure 9: Proportion of BLM rangelands with none-to-slight or slight-to-moderate departure from hydrologic function reference conditions (HF <=2) (80% confidence interval)*** 
+
+```{r fig 9, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["9"]]
+
+```
+
+#### ***Figure 10: BLM rangeland acres with none-to-slight or slight-to-moderate departure from hydrologic function reference conditions (HF <=2) (80% confidence interval)*** 
+
+```{r fig 10, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["10"]]
+
+```
+
+#### ***Figure 11: Proportion of BLM rangelands with moderate departure from hydrologic function reference conditions (HF = 3) (80% confidence interval)*** 
+
+```{r fig 11, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["11"]]
+
+```
+
+#### ***Figure 12: BLM rangeland acres with moderate departure from hydrologic function reference conditions (HF = 3) (80% confidence interval)*** 
+
+```{r fig 12, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["12"]]
+
+```
+
+#### ***Figure 13: Proportion of BLM rangelands with moderate or moderate-to-extreme or extreme-to-total departure from hydrologic function reference conditions (HF >= 3) (80% confidence interval)*** 
+
+```{r fig 13, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["13"]]
+
+```
+
+#### ***Figure 14: BLM rangeland acres with moderate or moderate-to-extreme or extreme-to-total departure from hydrologic function reference conditions (HF >= 3) (80% confidence interval)*** 
+
+```{r fig 14, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["14"]]
+
+```
+
+#### ***Figure 15: Proportion of BLM rangelands with moderate-to-extreme or extreme-to-total departure from hydrologic function reference conditions (HF >= 4) (80% confidence interval)*** 
+
+```{r fig 15, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["15"]]
+
+```
+
+#### ***Figure 16: BLM rangeland acres with moderate-to-extreme or extreme-to-total departure from hydrologic function reference conditions (HF >= 4) (80% confidence interval)*** 
+
+```{r fig 16, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["16"]]
+
+```
+
+#### ***Figure 17: Proportion of BLM rangelands with none-to-slight or slight-to-moderate departure from soil and site stability reference conditions (SSS <=2) (80% confidence interval) *** 
+
+```{r fig 17, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["17"]]
+
+```
+
+#### ***Figure 18: BLM rangeland acres with none-to-slight or slight-to-moderate departure from soil and site stability reference conditions (SSS <=2) (80% confidence interval)*** 
+
+```{r fig 18, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["18"]]
+
+```
+
+#### ***Figure 19: Proportion of BLM rangelands with moderate departure from soil and site stability reference conditions (SSS = 3) (80% confidence interval)*** 
+
+```{r fig 19, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["19"]]
+
+```
+
+#### ***Figure 20: BLM rangeland acres with moderate departure from soil and site stability reference conditions (SSS = 3) (80% confidence interval)*** 
+
+```{r fig 20, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["20"]]
+
+```
+
+#### ***Figure 21: Proportion of BLM rangelands with moderate or moderate-to-extreme or extreme-to-total departure from soil and site stability reference conditions (SSS >= 3) (80% confidence interval)*** 
+
+```{r fig 21, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["21"]]
+
+```
+
+#### ***Figure 22: BLM rangeland acres with moderate or moderate-to-extreme or extreme-to-total departure from soil and site stability reference conditions (SSS >= 3) (80% confidence interval)*** 
+
+```{r fig 22, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["22"]]
+
+```
+
+#### ***Figure 23: Proportion of BLM rangelands with moderate-to-extreme or extreme-to-total departure from soil and site stability reference conditions (SSS >= 4) (80% confidence interval)*** 
+
+```{r fig 23, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["23"]]
+
+```
+
+#### ***Figure 24: BLM rangeland acres with moderate-to-extreme or extreme-to-total departure from soil and site stability reference conditions (SSS >= 4) (80% confidence interval)*** 
+
+```{r fig 24, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["24"]]
+
+```
+
+#### ***Figure 25: Proportion of BLM rangelands where all 3 rangeland health attributes had none-to-slight or slight-to-moderate departure from reference conditions (<= 2) (80% confidence interval)*** 
+
+```{r fig 25, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["25"]]
+
+```
+
+#### ***Figure 26: BLM rangeland acres where all 3 rangeland health attributes had none-to-slight or slight-to-moderate departure from reference conditions (<= 2) (80% confidence interval)*** 
+
+```{r fig 26, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["26"]]
+
+```
+
+#### ***Figure 27: Proportion of BLM rangelands where all 3 rangeland health attributes had moderate-to-extreme or extreme-to-total departure from reference conditions (>= 4) (80% confidence interval)*** 
+
+```{r fig 27, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["27"]]
+
+```
+
+#### ***Figure 28: BLM rangeland acres where all 3 rangeland health attributes had moderate-to-extreme or extreme-to-total departure from reference conditions (>= 4) (80% confidence interval)*** 
+
+```{r fig 28, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["28"]]
+
+```
+
+#### ***Figure 29: Proportion of BLM rangelands where at least 1 rangeland health attribute had moderate departure from reference conditions (= 3) (80% confidence interval)*** 
+
+```{r fig 29, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["29"]]
+
+```
+
+#### ***Figure 30: BLM rangeland acres where at least 1 rangeland health attribute had moderate departure from reference conditions (= 3) (80% confidence interval)*** 
+
+```{r fig 30, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["30"]]
+
+```
+
+#### ***Figure 31: Proportion of BLM rangelands with non-native invasive species present (80% confidence interval)*** 
+
+```{r fig 31, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["31"]]
+
+```
+
+#### ***Figure 32: BLM rangeland acres with non-native invasive species present (80% confidence interval)*** 
+
+```{r fig 32, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["32"]]
+
+```
+
+#### ***Figure 33: Proportion of BLM rangelands where non-native invasive species are abundant (>= 25%) (80% confidence interval)*** 
+
+```{r fig 33, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["33"]]
+
+```
+
+#### ***Figure 34: BLM rangeland acres where non-native invasive species are abundant (>= 25%) (80% confidence interval)*** 
+
+```{r fig 34, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["34"]]
+
+```
+
+#### ***Figure 35: Proportion of BLM rangelands with at least 20% of land having intercanopy gaps of at least 2 meters (80% confidence interval)*** 
+
+```{r fig 35, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["35"]]
+
+```
+
+#### ***Figure 36: BLM rangeland acres with at least 20% of land having intercanopy gaps of at least 2 meters in length (80% confidence interval)*** 
+
+```{r fig 36, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["36"]]
+
+```
+
+#### ***Figure 37: Proportion of BLM rangelands with at least 20% of land having intercanopy gaps of at least 2 meters and gaps are at least 50% bare ground (80% confidence interval)*** 
+
+```{r fig 37, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["37"]]
+
+```
+
+#### ***Figure 38: BLM rangeland acres with at least 20% of land having intercanopy gaps of at least 2 meters and gaps are at least 50% bare ground (80% confidence interval)*** 
+
+```{r fig 38, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["38"]]
+
+```
+
+#### ***Figure 39: Percent cover of bare ground on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 39, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["39"]]
+
+```
+
+#### ***Figure 40: Proportion of BLM rangelands with at least 20% bare ground (80% confidence interval)*** 
+
+```{r fig 40, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["40"]]
+
+```
+
+#### ***Figure 41: BLM rangeland acres with at least 20% bare ground (80% confidence interval)*** 
+
+```{r fig 41, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["41"]]
+
+```
+
+#### ***Figure 42: Proportion of BLM rangelands with at least 30% bare ground (80% confidence interval)*** 
+
+```{r fig 42, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["42"]]
+
+```
+
+#### ***Figure 43: BLM rangeland acres with at least 30% bare ground (80% confidence interval)*** 
+
+```{r fig 43, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["43"]]
+```
+
+#### ***Figure 44: Proportion of BLM rangelands with at least 40% bare ground (80% confidence interval)*** 
+
+```{r fig 44, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["44"]]
+
+```
+
+#### ***Figure 45: BLM rangeland acres with at least 40% bare ground (80% confidence interval)*** 
+
+```{r fig 45, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["45"]]
+
+```
+
+#### ***Figure 46: Proportion of BLM rangelands with at least 50% bare ground (80% confidence interval)*** 
+
+```{r fig 46, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["46"]]
+
+```
+
+#### ***Figure 47: BLM rangeland acres with at least 50% bare ground (80% confidence interval)*** 
+
+```{r fig 47, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["47"]]
+
+```
+
+#### ***Figure 48: Proportion of BLM rangelands where soil aggregate stability is ranked 4 or less (80% confidence interval)*** 
+
+```{r fig 48, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["48"]]
+
+```
+
+#### ***Figure 49: BLM rangeland acres where soil aggregate stability is ranked 4 or less (80% confidence interval)*** 
+
+```{r fig 49, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["49"]]
+
+```
+
+#### ***Figure 50: Percent cover of sagebrush on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 50, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["50"]]
+
+```
+
+#### ***Figure 51: Mean sagebrush species height in inches on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 51, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["51"]]
+
+```
+
+#### ***Figure 52: Proportion of sagebrush that is columnar shaped on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 52, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["52"]]
+
+```
+
+#### ***Figure 53: Proportion of sagebrush that is spreading shaped on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 53, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["53"]]
+
+```
+
+#### ***Figure 54: Mean herbaceous plant species height in inches on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 54, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["54"]]
+
+```
+
+#### ***Figure 55: Percent cover of perennial grasses and perennial forbs on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 55, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["55"]]
+
+```
+
+#### ***Figure 56: Percent cover of bare ground on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 56, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["56"]]
+
+```
+
+#### ***Figure 57: Proportion of vegetation composed of annual grasses on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 57, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["57"]]
+
+```
+
+#### ***Figure 58: Proportion of vegetation composed of non-native invasive plant species on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 58, echo = FALSE , fig.height = 6 , fig.width = 8}
+
+list_of_plots[["58"]]
+
+```
+
+
+

@@ -1,0 +1,363 @@
+---
+title: "Landscape Monitoring Framework Estimates By Ecoregion"
+date: "4/8/2022"
+output: word_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## 
+
+```{r prep the data, echo = FALSE, include = FALSE}
+## Sage Grouse Indicators by State by Type
+
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+
+#this file has 2012 values replaced with year 2013 since the surveys actually took place in 2013
+Ecoregion <- read.csv(file = "C:\\Users\\alaurencetraynor\\Documents\\2022\\Analysis\\LMF\\RPA/FullTidyData_2012_2019/EstimatesByEcoregion_2012_2019_withlabels.csv", stringsAsFactors = FALSE)
+
+SampleSize <- read.csv(file = "C:\\Users\\alaurencetraynor\\Documents\\2022\\Analysis\\LMF\\RPA/SampleSizeTables/SampleSizeByEcoregion_Year.csv", stringsAsFactors = FALSE)
+
+#R is not reading numbers as numeric...fixing
+#Make sure Ecoregion name formatting is the same
+#I fixed this in excel 
+unique(SampleSize$Ecoregion) == unique(Ecoregion$Ecoregion)
+
+# make sure they have the same levels of year
+SampleSize <- SampleSize[SampleSize$Year %in% unique(Ecoregion$Year),]
+
+# Replace 2012 with 2013 because the sampling was actually in 2013
+Ecoregion$Year <- as.character(Ecoregion$Year)
+Ecoregion$Year <- gsub("2012" , "2013", Ecoregion$Year)
+Ecoregion$Year <- as.factor(Ecoregion$Year)
+
+# Join with sample size - sample size already has 2012 convert to 2013 
+Ecoregion <- merge(x = Ecoregion,
+                   y = subset(SampleSize, select = -c(Ecoregion_name)),
+                   by = c("Ecoregion", "Year"),
+                   all.x = TRUE)
+
+Ecoregion$Year <- format(as.Date(Ecoregion$Year, "%Y"),"%Y")
+
+# want to make sure all levels exist in sample sizes i.e. NA and 0 are there when they should be for all combinations of year and ecoregion
+#Ecoregion <- tidyr::complete(Ecoregion, Year, Ecoregion, Index, fill = list(BLM.Sample = 0, BLM.Acres = 0, Value = 0))
+
+# # Remove Marine west coast forest- there is no data
+# WCF <- Ecoregion %>% filter(Ecoregion == "Marine West Coast Forest") #No data
+
+Ecoregion <- Ecoregion %>% filter(!Ecoregion == "Marine West Coast Forest")
+
+#Pull the max value of acres for plot scale
+#Put acres in millions
+
+Ecoregion <- mutate(Ecoregion, Value2 = ifelse(var_type == "acres", Value/1000000, Value))
+
+Ecoregion <- mutate(Ecoregion, CI_Lower2 = ifelse(var_type == "acres", CI_Lower/1000000, CI_Lower)) %>% mutate(Ecoregion, CI_Upper2 = ifelse(var_type == "acres", CI_Upper/1000000, CI_Upper))
+
+#Replace small sample sizes with NA
+# 
+Ecoregion <- mutate(Ecoregion, Flag = ifelse(Value != 0|is.na(Value), NA, 0))
+Ecoregion$Flag <- as.integer(Ecoregion$Flag)
+
+Ecoregion <- mutate(Ecoregion, Value2 = ifelse(Value != 0, Value2, NA))
+Ecoregion <- mutate(Ecoregion, CI_Upper2 = ifelse(Value != 0, CI_Upper2, NA))
+Ecoregion <- mutate(Ecoregion, CI_Lower2 = ifelse(Value != 0, CI_Lower2, NA))
+
+Ecoregion <- mutate(Ecoregion, Value2 = ifelse(BLM.Sample >= 10, Value2, NA))
+Ecoregion <- mutate(Ecoregion, CI_Upper2 = ifelse(BLM.Sample >= 10, CI_Upper2, NA))
+Ecoregion <- mutate(Ecoregion, CI_Lower2 = ifelse(BLM.Sample >= 10, CI_Lower2, NA))
+
+Ecoregion <- mutate(Ecoregion, Flag = ifelse(BLM.Sample >= 10, NA, 0))
+
+#Ecoregion[["Value"]] <- trimws(Ecoregion[["Value"]])
+
+# as.numeric(as.character(Ecoregion$Value))
+# Ecoregion$SE <- as.numeric(as.character(Ecoregion$SE))
+# Ecoregion$CV <- as.numeric(as.character(Ecoregion$CV))
+# Ecoregion$CI_Lower <- as.numeric(as.character(Ecoregion$CI_Lower))
+# Ecoregion$CI_Upper <- as.numeric(as.character(Ecoregion$CI_Upper))
+
+# Set color scale
+#For coloring by ecoregion
+#cc <- scales::seq_gradient_pal("grey", "dodgerblue2", "Lab")(seq(0,1,length.out = (length(unique(Ecoregion$Ecoregion_name))))) 
+                                                                 
+#For coloring by year (this is what we wound up doing)                                                                 
+#cc2 <- scales::seq_gradient_pal("grey", "dodgerblue2", "Lab")(seq(0,1,length.out = (length(unique(Ecoregion$Year))))) 
+
+Ecoregion$BLM.Sample <- as.numeric(as.integer(Ecoregion$BLM.Sample))
+Ecoregion$Year <- as.factor(as.integer(Ecoregion$Year))
+Ecoregion$Ecoregion <- as.factor(as.character(Ecoregion$Ecoregion))
+
+write.csv(Ecoregion, "C:\\Users\\alaurencetraynor\\Documents\\2022\\Analysis\\LMF\\RPA\\2022 Updated Figures\\Ecoregion_plotdata.csv")
+
+# removing 2013 cos its empty
+Ecoregion <- Ecoregion %>%
+  filter(Year != "2013")
+
+## Alex's Modifications for 2022
+
+list_of_plots3 <- lapply(X = split(Ecoregion, Ecoregion[["Index"]]), FUN = function(Ecoregion){
+ current_plot2 <-  Ecoregion %>% 
+   mutate(Ecoregion = fct_relevel(Ecoregion, sort)) %>%
+   ggplot(aes(x = Year, y =  Value2)) +
+   geom_point(position = position_dodge(1), shape = 18, size = 3)+
+   geom_errorbar(aes(ymin = CI_Lower2,ymax = CI_Upper2), size = 0.4, width = 0.4, position = position_dodge(1)) +
+   geom_point(aes(x = Year, y = Flag), position = position_dodge(1), shape = 4, show.legend = FALSE, size = 3) +
+   labs(x = paste(Ecoregion$xlab) , y = paste(Ecoregion$ylab), caption = paste("X:", "Estimates unavailable due to small sample size (fewer than 10 samples)", sep = " ")) +
+   theme_bw(base_size = 14)+
+   facet_wrap(~Ecoregion)+
+   theme(legend.position = "bottom",
+         legend.justification = "center",
+         axis.text.x = element_text(angle = 45, vjust = 0.5),
+         legend.title = element_blank(),
+         plot.caption = element_text(face = "italic", size = "12", hjust = 0.5)) 
+   #geom_text(aes(label = paste0("n=", BLM.Sample), y = CI_Upper2 + 10), data = filter(Ecoregion,!is.na(Flag)) )
+  
+ # if(Ecoregion$Indicator_Number == "33"){labs(caption = "X: Estimates unavailable due to small sample size \nAnnual grasses include: Bromus tectorum, Taeniatherum caput-medusae")} 
+   
+    return(current_plot2)
+  
+})
+
+## for sarahs paper
+
+ Ecoregion <- read.csv("\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\C drive back up\\2022\\Analysis\\LMF\\RPA\\2022 Updated Figures\\Ecoregion_plotdata.csv")
+
+ ## grab only the indicators we need
+
+ # indicators <- c("PERCENT NON-NATIVE INVASIVE PLANT SPECIES ON BLM RANGE",
+ #                 "PERCENT OF BARE GROUND ON BLM RANGE",
+ #                 "PERCENT FOLIAR COVER OF PERENNIAL GRASS AND PERENNIAL FORB ON BLM RANGE",
+ #                 "NON-NATIVE INVASIVE SPECIES ARE PRESENT",
+ #                 "25% OR GREATER OF FOLIAGE COMPOSED OF NON-NATIVE INVASIVE SPECIES")
+ # 
+ # Ecoregion_sm <- Ecoregion[Ecoregion[["Indicator"]] %in% indicators,] %>%
+ #    mutate(Ecoregion = fct_relevel(Ecoregion, sort))
+ # 
+ # # split this into plot with the same y axis
+ # figure_list <- lapply(X = split(x = Ecoregion_sm, f = Ecoregion_sm$ylab), FUN = function(plot_data){
+ #    plot <- ggplot(data = plot_data, aes(x = Year, y =  Value2, col = Indicator)) +
+ #       geom_point(position = position_dodge(1), size = 3)+
+ #       geom_errorbar(aes(ymin = CI_Lower2,ymax = CI_Upper2), size = 1, width = 0.5, position = position_dodge(1)) +
+ #       geom_point(aes(x = Year, y = Flag), position = position_dodge(1), shape = 4, show.legend = FALSE, size = 3) +
+ #       labs(x = paste(plot_data$xlab) , y = paste(plot_data$ylab), caption = paste("X:", "Estimates unavailable due to small sample size (fewer than 10 plots)", sep = " ")) +
+ #       theme_bw(base_size = 14)+
+ #       facet_wrap(~Ecoregion)+
+ #       theme(legend.position = "bottom",
+ #             legend.justification = "center",
+ #             axis.text.x = element_text(angle = 45, vjust = 0.5),
+ #             legend.title = element_blank(),
+ #             plot.caption = element_text(face = "italic", size = "12", hjust = 0.5))+
+ #      scale_color_brewer(type = "qual", palette = 1)+
+ #      guides(shape = "none")
+ # 
+ #    return(plot)
+ # })
+ 
+for(i in seq(1:7)){
+  k <- list_of_plots3[[i]]$data$Indicator[1]
+    ggsave(list_of_plots3[[i]], filename = paste0("Plot_",k,".eps"), device = "eps", dpi = 300, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+}
+
+```
+
+#### ***Figure 1: Proportion of BLM rangelands with none-to-slight or slight-to-moderate departure from biotic integrity reference conditions (BI <=2) (80% confidence interval)*** 
+
+```{r fig 1, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["1"]]
+
+                                                                                      ggsave(filename = "Fig6_Biotic_Integrity_NSSM.tif", device = "tiff",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+                                                                                      
+                                                                                      ggsave(filename = "Fig6_Biotic_Integrity_NSSM.eps", device = "eps",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+```
+
+
+#### ***Figure 2: Proportion of BLM rangelands with moderate departure from biotic integrity reference conditions (BI = 3) (80% confidence interval)*** 
+
+```{r fig 3, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["2"]]
+
+```
+
+
+#### ***Figure 3: Proportion of BLM rangelands with moderate or moderate-to-extreme or extreme-to-total departure from biotic integrity reference conditions (BI >=3) (80% confidence interval)*** 
+
+```{r fig 5, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["5"]]
+
+```
+
+
+#### ***Figure 4: Proportion of BLM rangelands with moderate-to-extreme or extreme-to-total departure from biotic integrity reference conditions (BI >= 4) (80% confidence interval)*** 
+
+```{r fig 7, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["7"]]
+
+```
+
+
+#### ***Figure 5: Proportion of BLM rangelands with none-to-slight or slight-to-moderate departure from hydrologic function reference conditions (HF <=2) (80% confidence interval)*** 
+
+```{r fig 9, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["9"]]
+
+
+                                                                                      ggsave(filename = "Fig8_Hydro_Function_NSSM.tif", device = "tiff",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+                                                                                      
+                                                                                      ggsave(filename = "Fig8_Hydro_Function_NSSM.eps", device = "eps",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+```
+
+
+#### ***Figure 6: Proportion of BLM rangelands with moderate departure from hydrologic function reference conditions (HF = 3) (80% confidence interval)*** 
+
+```{r fig 11, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["11"]]
+
+```
+
+
+#### ***Figure 7: Proportion of BLM rangelands with moderate or moderate-to-extreme or extreme-to-total departure from hydrologic function reference conditions (HF >= 3) (80% confidence interval)*** 
+
+```{r fig 13, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["13"]]
+
+```
+
+#### ***Figure 8: Proportion of BLM rangelands with moderate-to-extreme or extreme-to-total departure from hydrologic function reference conditions (HF >= 4) (80% confidence interval)*** 
+
+```{r fig 15, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["15"]]
+
+```
+
+
+#### ***Figure 9: Proportion of BLM rangelands with none-to-slight or slight-to-moderate departure from soil and site stability reference conditions (SSS <=2) (80% confidence interval) *** 
+
+```{r fig 17, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["17"]]
+# # 
+
+
+                                                                                      ggsave(filename = "Fig7_Soil_Stability_NSSM.tif", device = "tiff",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+                                                                                      
+                                                                                      ggsave(filename = "Fig7_Soil_Stability_NSSM.eps", device = "eps",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+
+```
+
+
+#### ***Figure 10: Proportion of BLM rangelands with moderate departure from soil and site stability reference conditions (SSS = 3) (80% confidence interval)*** 
+
+```{r fig 19, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["19"]]
+
+```
+
+#### ***Figure 11: Proportion of BLM rangelands with moderate or moderate-to-extreme or extreme-to-total departure from soil and site stability reference conditions (SSS >= 3) (80% confidence interval)*** 
+
+```{r fig 21, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["21"]]
+
+```
+
+
+#### ***Figure 12: Proportion of BLM rangelands with moderate-to-extreme or extreme-to-total departure from soil and site stability reference conditions (SSS >= 4) (80% confidence interval)*** 
+
+```{r fig 23, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["23"]]
+
+```
+
+
+#### ***Figure 13: Proportion of BLM rangelands where all 3 rangeland health attributes had none-to-slight or slight-to-moderate departure from reference conditions (<= 2) (80% confidence interval)*** 
+
+```{r fig 25, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["25"]]
+
+```
+
+
+#### ***Figure 14: Proportion of BLM rangelands where all 3 rangeland health attributes had moderate-to-extreme or extreme-to-total departure from reference conditions (>= 4) (80% confidence interval)*** 
+
+```{r fig 27, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["27"]]
+
+```
+
+
+#### ***Figure 15: Proportion of BLM rangelands where at least 1 rangeland health attribute had moderate departure from reference conditions (= 3) (80% confidence interval)*** 
+
+```{r fig 29, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["29"]]
+
+```
+
+
+#### ***Figure 16: Proportion of BLM rangelands with non-native invasive species present (80% confidence interval)*** 
+
+```{r fig 31, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["31"]]
+# # 
+
+ 
+                                                                                       ggsave(filename = "Fig9_Invasive_Presence_NSSM.tif", device = "tiff",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+                                                                                      
+                                                                                      ggsave(filename = "Fig9_Invasive_Presence_NSSM.eps", device = "eps",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+
+```
+
+#### ***Figure 17: Proportion of BLM rangelands where non-native invasive species are abundant (>= 25%) (80% confidence interval)*** 
+
+```{r fig 33, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["33"]]
+
+```
+
+
+#### ***Figure 18: Proportion of BLM rangelands with at least 20% of land having intercanopy gaps of at least 2 meters (80% confidence interval)*** 
+
+```{r fig 35, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["35"]]
+
+```
+
+#### ***Figure 19: Proportion of BLM rangelands with at least 20% of land having intercanopy gaps of at least 2 meters and gaps are at least 50% bare ground (80% confidence interval)*** 
+
+```{r fig 37, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["37"]]
+
+```
+
+#### ***Figure 20: Percent cover of bare ground on BLM rangelands (80% confidence interval)*** 
+
+```{r fig 39, echo = FALSE , fig.height = 10 , fig.width = 12}
+
+list_of_plots3[["39"]]
+# 
+
+                                                                                       ggsave(filename = "Fig10_Bare_Ground_NSSM.tif", device = "tiff",dpi = 600, path ="C:\\Users\\alaurencetraynor\\Documents", width = 11, height = 8)
+                                                                                      
+                                                                                      ggsave(filename 
