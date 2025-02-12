@@ -1,0 +1,437 @@
+---
+title: "biocrusts"
+output: html_document
+---
+
+### Load libraries
+```{r setup, include=FALSE}
+library(RODBC)
+library(tidyverse)
+library(wesanderson)
+library(rnaturalearth)
+library(sf)
+library(scales)
+```
+
+### SDE connections and feature class loading
+```{r}
+con1 <-  odbcConnect("ilmocAIMPub")
+
+## Look at AIM SDE structure
+odbcGetInfo(con1)
+sqlTables(con1)
+
+## import terradat data
+terradat <- sqlQuery(con1, "SELECT * FROM ilmocAIMPub.ilmocAIMPubDBO.TerrADat;")
+lmf <- sqlQuery(con1, "SELECT * FROM ilmocAIMPub.ilmocAIMPubDBO.LMF;")
+```
+
+### Select fields
+```{r}
+lmf[["unique_id"]] <- lmf[["PrimaryKey"]]
+terradat[["unique_id"]] <- terradat[["PrimaryKey"]]
+
+## select pertinent fields - terradat only has first hit data (dosnt include mosses and lichen with plants/litter etc above them). These will be underestimations of any hit cover.
+lmf_bc <- dplyr::select(lmf, "unique_id", "FH_MossCover", "FH_LichenCover", "Latitude_NAD83", "Longitude_NAD83")
+terradat_bc <- dplyr::select(terradat, "unique_id", "FH_MossCover", "FH_LichenCover", "Latitude_NAD83", "Longitude_NAD83")
+```
+
+
+### Merge LMF/Terradat
+```{r}
+lmf_bc[["Type"]] <- "LMF"
+terradat_bc[["Type"]] <- "AIM"
+
+## all plot data for bio crusts
+all_bc <- rbind(lmf_bc,terradat_bc)
+
+## double check unique ids are ACTUALLY unique
+nrow(all_bc)== length(unique(all_bc[["unique_id"]]))
+sum(duplicated(all_bc[["unique_id"]]))
+
+## actually one duplicate plot...
+all_bc[["unique_id"]][duplicated(all_bc[["unique_id"]])]
+all_bc[duplicated(all_bc),] # but only primary key is a duplicate, not the data...
+
+## just remove for now
+all_bc <- all_bc[all_bc[["unique_id"]][!duplicated(all_bc[["unique_id"]])],]
+
+## what about number of NAs?
+sum(is.na(all_bc[["FH_MossCover"]])) ## 32
+sum(is.na(all_bc[["FH_LichenCover"]])) ## 32
+
+#3 remove NAs for now
+all_bc <- all_bc[!is.na(all_bc[["FH_MossCover"]]),]
+
+## total plot count
+nrow(all_bc) # 29,184
+
+```
+
+### Convert cover to presence / absence per plot
+```{r}
+all_bc[["Moss_presence"]] <- ifelse(all_bc[["FH_MossCover"]]>0,
+                                    all_bc[["Moss_presence"]] <- 1,
+                                     all_bc[["Moss_presence"]] <- 0)
+
+all_bc[["Lichen_presence"]] <- ifelse(all_bc[["FH_LichenCover"]]>0,
+                                    all_bc[["Lichen_presence"]] <- 1,
+                                     all_bc[["Lichen_presence"]] <- 0)
+
+all_bc[["Biocrust_presence"]] <- ifelse(all_bc[["FH_LichenCover"]]>0|all_bc[["FH_MossCover"]]>0,
+                                    all_bc[["Biocrust_presence"]] <- 1,
+                                     all_bc[["Biocrust_presence"]] <- 0)
+
+# Moss and Lichen are both soil surface codes so can be additive
+all_bc[["FH_BiocrustCover"]] <- all_bc[["FH_MossCover"]] + all_bc[["FH_LichenCover"]]
+```
+
+
+### Summarise (to ecoregion)
+```{r}
+## total counts
+sum(all_bc[["Biocrust_presence"]])# 8641
+sum(all_bc[["Moss_presence"]]) # 5702
+sum(all_bc[["Lichen_presence"]]) # 4145
+
+## mean cover
+mean(all_bc[["FH_MossCover"]]) # 0.44%
+mean(all_bc[["FH_LichenCover"]]) # 0.51%
+mean(all_bc[["FH_BiocrustCover"]]) # 0.95%
+
+summary(all_bc[["FH_MossCover"]]) 
+summary(all_bc[["FH_LichenCover"]]) 
+summary(all_bc[["FH_BiocrustCover"]])
+
+# add ecoregions to this
+# import table of AIM/LMF spatial join from Arc
+aim_lut <-sf::st_read(dsn = "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC/Biocrust.gdb",
+                        layer = "AIM_join",
+                        stringsAsFactors = FALSE)
+sf::st_geometry(aim_lut) <- NULL
+
+aim_lut <- as.data.frame(aim_lut)%>%
+  dplyr::select(PrimaryKey, STATE_NAME,NA_L2NAME)
+
+colnames(aim_lut)[1] <- "unique_id"
+
+# same for LMF
+lmf_lut <-sf::st_read(dsn = "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC/Biocrust.gdb",
+                        layer = "LMF_join",
+                        stringsAsFactors = FALSE)
+sf::st_geometry(lmf_lut) <- NULL
+
+lmf_lut <- as.data.frame(lmf_lut)%>%
+  dplyr::select(PLOTKEY, STATE_NAME,NA_L2NAME)
+
+colnames(lmf_lut)[1] <- "unique_id"
+
+all_lut <- rbind(aim_lut,lmf_lut)
+
+# drop the NAS (these are from alaska)
+all_lut <- subset(all_lut, !is.na(all_lut$NA_L2NAME))
+
+all_bc_join <- merge(x= all_bc, 
+                     y = all_lut,
+                     by = "unique_id",
+                     all.x = FALSE)
+
+# count of aim/lmf plots in each ecoregion to calc proportions
+total <- all_bc_join %>%
+  group_by(NA_L2NAME)%>%
+  summarise(total = length(unique(unique_id)),
+            lichen = sum(Lichen_presence),
+            moss = sum(Moss_presence),
+            biocrust = sum(Biocrust_presence))%>%
+  mutate(lichen_prop = lichen/total,
+         moss_prop = moss/total,
+         biocrust_prop = biocrust/total)%>%
+  ungroup()
+
+# meditarenain cali is doubled let fix that
+total[["NA_L2NAME"]][total[["NA_L2NAME"]]== "Mediterranean California\r\nMediterranean California\r\n"] <- "Mediterranean California"
+
+## Add all blm lands
+all_blm <- all_bc_join %>%
+  summarise(NA_L2NAME = "All BLM Range",
+            total = length(unique(unique_id)),
+            lichen = sum(Lichen_presence),
+            moss = sum(Moss_presence),
+            biocrust = sum(Biocrust_presence))%>%
+  mutate(lichen_prop = lichen/total,
+         moss_prop = moss/total,
+         biocrust_prop = biocrust/total)
+
+total <- rbind(total,all_blm)
+
+# reorder ecoregion factor
+total[["NA_L2NAME"]] <- as.factor(total[["NA_L2NAME"]])
+total[["NA_L2NAME"]] <- factor(total[["NA_L2NAME"]],levels(total[["NA_L2NAME"]])[c(11:1)])
+total <- total[order(total[["NA_L2NAME"]], decreasing = FALSE),]
+
+figure1 <- total[,c(1,6,7)]
+
+# simple bar grpahs of counts
+figure1 <-  pivot_longer(figure1 ,c(2,3),names_to = "Indicator",values_to = "Proportion")
+
+# export this plot count summary for a map in ArcGIS
+write.csv(total, "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC/total.csv")
+```
+
+### Graphics
+```{r}
+# pretty colors 
+pal3 <- wes_palette("Moonrise2",2, type = "discrete")
+
+# horizontal column graph
+g  <- ggplot(data = figure1, aes(x=NA_L2NAME, y = Proportion, fill = Indicator))+
+  geom_col(position = "dodge")+ 
+  scale_fill_manual(values = pal3, labels = c("Lichen","Moss"))+
+  labs(y="Percent of AIM/LMF plots with Moss or Lichen Present", x = "Ecoregion")+
+  theme(legend.position = "right", axis.text.x = element_text(angle = 40, vjust = 0.6))+
+  coord_flip(ylim = c(0,1))+ 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme(strip.text.x = element_text(size = 12 , color = "black" , face = "bold") ,
+                       panel.background = element_rect(fill = "white") , 
+                       panel.grid = element_line(color = "grey") ,
+                       panel.grid.minor = element_blank() , 
+                       panel.grid.major.x = element_line(color = "grey95"), 
+                       axis.title.x = element_text(size = 12), 
+                       axis.title.y = element_text(size = 12), 
+                       axis.text.x = element_text(size = 12.5) , 
+                       axis.text.y = element_text(size = 12.5), 
+                       legend.text = element_text(size = 12), 
+                       legend.title = element_text(size = 12) , 
+                       legend.position = "bottom", 
+                       legend.justification = "right", 
+             plot.caption = element_text(face = "italic", size = "8", hjust = 0))
+
+# add sample size
+g <- g + geom_text(data = total, aes(x= NA_L2NAME, y = biocrust_prop, label = paste0("n = ",comma(total))),inherit.aes = FALSE, size=3, hjust = -0.1)
+print(g)
+
+ggsave(g,filename="mosslichen_counts_l2+EK.tif",device = "tiff", dpi =300, path = "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC", height = 7,width=12)
+
+## same graph but with biocrusts (i.e. moss or lichen)
+b  <- ggplot(data = total, aes(x=NA_L2NAME, y = biocrust_prop))+
+  geom_col(fill = "dodgerblue2", width = 0.2)+ 
+  labs(y="Percent of AIM/LMF plots with Biocrusts (moss and lichen)", x = "Ecoregion")+
+  theme(legend.position = "right", axis.text.x = element_text(angle = 40, vjust = 0.6))+
+  coord_flip(ylim = c(0,1))+ 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme(strip.text.x = element_text(size = 12 , color = "black" , face = "bold") ,
+                       panel.background = element_rect(fill = "white") , 
+                       panel.grid = element_line(color = "grey") ,
+                       panel.grid.minor = element_blank() , 
+                       panel.grid.major.x = element_line(color = "grey95"), 
+                       axis.title.x = element_text(size = 12), 
+                       axis.title.y = element_text(size = 12), 
+                       axis.text.x = element_text(size = 12.5) , 
+                       axis.text.y = element_text(size = 12.5), 
+                       legend.text = element_text(size = 12), 
+                       legend.title = element_text(size = 12) , 
+                       legend.position = "bottom", 
+                       legend.justification = "right", 
+             plot.caption = element_text(face = "italic", size = "8", hjust = 0))
+
+# add sample size
+b <- b + geom_text(data = total, aes(x= NA_L2NAME, y = biocrust_prop, label = paste0("n = ",comma(total))),inherit.aes = FALSE, size=3, hjust = -0.2)
+print(b)
+
+ggsave(b,filename="biocrust_counts_l2+EK.tif",device = "tiff", dpi =300, path = "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC", height = 7,width=14)
+```
+
+
+## Split out by Year
+### Select fields
+```{r}
+## select pertinent fields - terradat only has first hit data (dosnt include mosses and lichen with plants/litter etc above them). These will be underestimations of any hit cover.
+lmf_bc_year <- dplyr::select(lmf, "unique_id", "FH_MossCover", "FH_LichenCover", "Latitude_NAD83", "Longitude_NAD83", "DateVisited")
+terradat_bc_year <- dplyr::select(terradat, "unique_id", "FH_MossCover", "FH_LichenCover", "Latitude_NAD83", "Longitude_NAD83", "DateVisited")
+
+```
+
+
+### Merge LMF/Terradat
+```{r}
+lmf_bc_year[["Type"]] <- "LMF"
+terradat_bc_year[["Type"]] <- "AIM"
+
+## all plot data for bio crusts
+all_bc_year <- rbind(lmf_bc_year,terradat_bc_year)
+
+## double check unique ids are ACTUALLY unique
+nrow(all_bc_year)== length(unique(all_bc_year[["unique_id"]]))
+sum(duplicated(all_bc_year[["unique_id"]]))
+
+## just remove for now
+all_bc_year <- all_bc_year[all_bc_year[["unique_id"]][!duplicated(all_bc_year[["unique_id"]])],]
+
+## what about number of NAs?
+sum(is.na(all_bc_year[["FH_MossCover"]])) ## 32
+sum(is.na(all_bc_year[["FH_LichenCover"]])) ## 32
+
+#3 remove NAs for now
+all_bc_year <- all_bc_year[!is.na(all_bc_year[["FH_MossCover"]]),]
+
+## total plot count
+nrow(all_bc_year) # 29,183
+
+all_bc_year[["Year"]] <- format(as.POSIXct(all_bc_year[["DateVisited"]], format="%Y-%m-%d"), "%Y")
+
+```
+
+### Convert cover to presence / absence per plot
+```{r}
+all_bc_year[["Moss_presence"]] <- ifelse(all_bc_year[["FH_MossCover"]]>0,
+                                    all_bc_year[["Moss_presence"]] <- 1,
+                                     all_bc_year[["Moss_presence"]] <- 0)
+
+all_bc_year[["Lichen_presence"]] <- ifelse(all_bc_year[["FH_LichenCover"]]>0,
+                                    all_bc_year[["Lichen_presence"]] <- 1,
+                                     all_bc_year[["Lichen_presence"]] <- 0)
+
+all_bc_year[["Biocrust_presence"]] <- ifelse(all_bc_year[["FH_LichenCover"]]>0|all_bc_year[["FH_MossCover"]]>0,
+                                    all_bc_year[["Biocrust_presence"]] <- 1,
+                                     all_bc_year[["Biocrust_presence"]] <- 0)
+
+# Moss and Lichen are both soil surface codes so can be additive
+all_bc_year[["FH_BiocrustCover"]] <- all_bc_year[["FH_MossCover"]] + all_bc_year[["FH_LichenCover"]]
+```
+
+
+### Summarise (to ecoregion)
+```{r}
+## total counts
+sum(all_bc_year[["Biocrust_presence"]])# 8641
+sum(all_bc_year[["Moss_presence"]]) # 5702
+sum(all_bc_year[["Lichen_presence"]]) # 4145
+
+## mean cover
+mean(all_bc_year[["FH_MossCover"]]) # 0.44%
+mean(all_bc_year[["FH_LichenCover"]]) # 0.51%
+mean(all_bc_year[["FH_BiocrustCover"]]) # 0.95%
+
+summary(all_bc_year[["FH_MossCover"]]) 
+summary(all_bc_year[["FH_LichenCover"]]) 
+summary(all_bc_year[["FH_BiocrustCover"]])
+
+all_bc_year_join <- merge(x= all_bc_year, 
+                     y = all_lut,
+                     by = "unique_id",
+                     all.x = FALSE)%>%
+  filter(Year>=2011,
+         Year<2020)
+
+# count of aim/lmf plots in each ecoregion to calc proportions
+total_year <- all_bc_year_join %>%
+  group_by(NA_L2NAME, Year)%>%
+  summarise(total = length(unique(unique_id)),
+            lichen = sum(Lichen_presence),
+            moss = sum(Moss_presence),
+            biocrust = sum(Biocrust_presence))%>%
+  mutate(lichen_prop = lichen/total,
+         moss_prop = moss/total,
+         biocrust_prop = biocrust/total)%>%
+  ungroup()
+
+# meditarenain cali is doubled let fix that
+total_year[["NA_L2NAME"]][total_year[["NA_L2NAME"]]== "Mediterranean California\r\nMediterranean California\r\n"] <- "Mediterranean California"
+
+## Add all blm lands
+all_blm_year <- all_bc_year_join %>%
+  group_by(Year)%>%
+  summarise(NA_L2NAME = "All BLM Range",
+            total = length(unique(unique_id)),
+            lichen = sum(Lichen_presence),
+            moss = sum(Moss_presence),
+            biocrust = sum(Biocrust_presence))%>%
+  mutate(lichen_prop = lichen/total,
+         moss_prop = moss/total,
+         biocrust_prop = biocrust/total)
+
+total_year <- rbind(total_year,all_blm_year)
+
+# reorder ecoregion factor
+total_year[["NA_L2NAME"]] <- as.factor(total_year[["NA_L2NAME"]])
+total_year[["NA_L2NAME"]] <- factor(total_year[["NA_L2NAME"]],levels(total_year[["NA_L2NAME"]])[c(11:1)])
+total_year <- total_year[order(total_year[["NA_L2NAME"]], decreasing = FALSE),]
+
+## make sure year factor is straight
+total_year[["Year"]] <- as.factor(total_year[["Year"]])
+total_year[["Year"]] <- factor(total_year[["Year"]],levels(total_year[["Year"]])[c(9:1)])
+total_year <- total_year[order(total_year[["Year"]], decreasing = FALSE),]
+
+# export this plot count summary for a map in ArcGIS
+write.csv(total, "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC/total_year.csv")
+```
+
+### Graphics
+```{r}
+cc2 <- scales::seq_gradient_pal("grey", "dodgerblue2", "Lab")(seq(0,1,length.out = (length(unique(total_year$Year))))) 
+
+## same graph but with biocrusts (i.e. moss or lichen)
+b  <- ggplot(data = total_year, aes(x=NA_L2NAME, y = biocrust_prop, fill = Year))+
+  geom_col(position = position_dodge2(1))+ 
+  labs(y="Percent of AIM/LMF plots with Biocrusts (moss and lichen)", x = "Ecoregion")+
+  theme(legend.position = "right", axis.text.x = element_text(angle = 40, vjust = 0.6))+
+  coord_flip(ylim = c(0,1))+ 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme(strip.text.x = element_text(size = 12 , color = "black" , face = "bold") ,
+                       panel.background = element_rect(fill = "white") , 
+                       panel.grid = element_line(color = "grey") ,
+                       panel.grid.minor = element_blank() , 
+                       panel.grid.major.x = element_line(color = "grey95"), 
+                       axis.title.x = element_text(size = 12), 
+                       axis.title.y = element_text(size = 12), 
+                       axis.text.x = element_text(size = 12.5) , 
+                       axis.text.y = element_text(size = 12.5), 
+                       legend.text = element_text(size = 12), 
+                       legend.title = element_text(size = 12) , 
+                       legend.position = "bottom", 
+                       legend.justification = "right", 
+             plot.caption = element_text(face = "italic", size = "8", hjust = 0))+
+   scale_fill_manual(values=cc2, guide = guide_legend(reverse=TRUE))
+
+# add sample size
+b <- b + geom_text(data = total, aes(x= NA_L2NAME, y = biocrust_prop, label = paste0("n = ",comma(total))),inherit.aes = FALSE, size=3, hjust = -0.2)
+print(b)
+
+ggsave(b,filename="biocrust_counts_l2_year.tif",device = "tiff", dpi =300, path = "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC", height = 7,width=14)
+
+
+cc2 <- scales::seq_gradient_pal("grey", "dodgerblue2", "Lab")(seq(0,1,length.out = (length(unique(total_year$Year))))) 
+
+## same graph but with remaking from original figure code
+b  <- ggplot(data = total_ecoregion, aes(x=NA_L2NAME, y = biocrust_prop))+
+  geom_col(position = position_dodge2(1))+ 
+  labs(y="Percent of AIM/LMF plots with Biocrusts (moss and lichen)", x = "Ecoregion")+
+  theme(legend.position = "right", axis.text.x = element_text(angle = 40, vjust = 0.6))+
+  coord_flip(ylim = c(0,1))+ 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  theme(strip.text.x = element_text(size = 12 , color = "black" , face = "bold") ,
+                       panel.background = element_rect(fill = "white") , 
+                       panel.grid = element_line(color = "grey") ,
+                       panel.grid.minor = element_blank() , 
+                       panel.grid.major.x = element_line(color = "grey95"), 
+                       axis.title.x = element_text(size = 12), 
+                       axis.title.y = element_text(size = 12), 
+                       axis.text.x = element_text(size = 12.5) , 
+                       axis.text.y = element_text(size = 12.5), 
+                       legend.text = element_text(size = 12), 
+                       legend.title = element_text(size = 12) , 
+                       legend.position = "bottom", 
+                       legend.justification = "right", 
+             plot.caption = element_text(face = "italic", size = "8", hjust = 0))+
+   scale_fill_manual(values=cc2, guide = guide_legend(reverse=TRUE))
+
+# add sample size
+b <- b + geom_text(data = total, aes(x= NA_L2NAME, y = biocrust_prop, label = paste0("n = ",comma(total))),inherit.aes = FALSE, size=3, hjust = -0.2)
+print(b)
+
+ggsave(b,filename="biocrust_counts_l2_year.tif",device = "tiff", dpi =300, path = "//blm.doi.net/dfs/loc/EGIS/ProjectsNational/AIM/Terrestrial/Analysis & Reporting/Analysis Requests/OC", height = 7,width=14)
+```
+
+
+
+

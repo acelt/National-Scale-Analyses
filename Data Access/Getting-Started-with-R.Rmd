@@ -1,0 +1,112 @@
+---
+title: "Getting Started with R (for BLM users)"
+date: October 9, 2019
+output:
+  prettydoc::html_pretty:
+  theme: cayman
+---
+### Install the Current Version of R
+You should be able to install the most current version of R from your web browser. For example, you can select the appropriate version of R [here](https://cran.cnr.berkeley.edu/) or [here](https://www.r-project.org/). Remember to save this to your C drive as this will prevent access issues down the line.
+
+Suggestion: install both 3.5.3 and 3.6.1 for now as Sarah McCord is working on getting Terradactyl up and running in 3.6.1. You can switch between R versions in Rstudio using _'Tools' -> 'Global Options' -> click 'Change' next to 'R version' and 'Choose a specific version of R'_
+
+### Install Rtools
+RTools is required for several packages. You should be able to download this yourself at <https://cran.r-project.org/bin/windows/Rtools/>. Shannon used `RTools35.exe` as of September 2019. You may need to submit a remedy ticket if you are having permission issues with this.
+
+### Setting your Directory
+Many issues with using R on a BLM computer seem to come from trying to save to or load from BLM network directories. These issues can be solved by pointing R to your personal C drive.
+
+#### **Step 1.** Set default working directory in Rstudio
+Got to _'Tools' -> 'Global Options' -> 'General' -> Click 'Browse'_ under default working directory and select an approporiate folder on your C drive. You can also change your working directory on the fly with `setwd()`:
+
+```{r, eval = FALSE}
+getwd() ## to check the current working directory
+setwd("C:\\Users\\your_username\\Documents\\2019\\R") ## use to set where R should save and load documents  (You can also change the default directory using the RStudio Tools tab as above)
+```
+#### **Step 2.** Set directory for where to install packages
+```{r, eval=FALSE}
+.libPaths("C:\\Users\\alaurencetraynor\\Documents\\2019\\R\\win-library\\3.6") ## set default directory for where packages are installed
+.libPaths() ## make sure the C drive directory is correct and you dont have a network directory listed here
+```
+### Installing Relevant Packages
+For a great list of packages relevant to natural resource data analysis check out [Nelson's Magic Package Installer.](https://github.com/nstauffer/REM504-DataScience/blob/master/Useful_R_Scripts/package_installation.r)
+
+Some other relevant packages may include: `sf`, `pander`, `knitr`,`rmarkdown`,`spData`,`roxygen2`, `digest`.
+
+### Tips for package use
+Sometimes the same exact function may occur in several packages e.g. `filter()`. The most recently loaded package will then 'mask' those duplicate functions in previously loaded packages. If you don't specifiy otherwise, masking will then use the function from the most recently loaded package.
+
+For example:
+```{r}
+library(plyr)
+library(dplyr)
+```
+
+To get around this you can specify exactly which package you want the functions to come from using `::` 
+```{r, eval = FALSE}
+stats::filter()
+dplyr::filter()
+```
+### R Tutorials and Cheatsheets
+You can find the Rstudio cheatsheets here: <https://rstudio.com/resources/cheatsheets>. You can also find these via Rstudio: go to _Help -> Cheatsheets._
+In particular, some super useful cheatsheets include:
+
++ Data transformation with dplyr
++ Rmarkdown
++ Data visulization with ggplot2
+
+For more interactive tutorials the [DataCamp](https://www.datacamp.com) website has many excellent videos and walkthroughs.
+
+### Formatting Code
+Formatting code clearly and keeping a consistent style makes scripts easier to understand! A great style guide for this can be found [here.](https://style.tidyverse.org/)
+
+Some examples include:
+
++ Using descriptive object names:
+```{r, eval=FALSE}
+# Good
+fit_models.R
+utility_functions.R
+
+# Bad
+fit models.R
+foo.r
+stuff.r
+```
++ Limiting the amount of code per line
+```{r, eval=FALSE}
+# Good
+do_something_very_complicated(
+  something = "that",
+  requires = many,
+  arguments = "some of which may be long"
+)
+
+# Bad
+do_something_very_complicated("that", requires, many, arguments,"some of which may be long")
+```
++ Documenting/annotating your code 
+```{r, eval=FALSE}
+# read input
+input_data <- read.csv(input_file)
+# get number of samples in data
+sample_number <- nrow(input_data)
+# generate results
+results <- some_other_function(input_file, sample_number)
+# write results
+write.table(results, output_file)
+```
+### R Markdown
+
+Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. It is particularly helpful when you have large amounts of text or figures along wiht your code. For more details on using R Markdown see [this page](http://rmarkdown.rstudio.com) and [this helpful guide.](https://bookdown.org/yihui/rmarkdown/)
+
+### GitHub
+[Github](https://github.com/) provides a free public server for storing and sharing files. Github runs off of `Git` which is an open source Version Control Software. Together they provide an excellent platform for keeping track of updates and changes to files (such as R code) and a nice way to share and collaborate on projects.
+
+[Here](https://guides.github.com/introduction/flow/) is a guide on the workflow of Github and some of the important terminology.
+
+### **Remember you are not alone!**
+Many of us have struggled through these issues, so reach out with any questions!
+
+#### Points of contact: 
+Alex Traynor - `alaurencetraynor@blm.gov`

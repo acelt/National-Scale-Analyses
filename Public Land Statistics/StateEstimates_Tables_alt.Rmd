@@ -1,0 +1,87 @@
+---
+title: "Landscape Monitoring Framework Estimates By State - Summary Tables"
+date: "9/26/2022"
+output: word_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+
+library(tidyverse)
+library(gt)
+```
+
+```{r prep the data, echo = FALSE, include = FALSE}
+# read in dataset
+states_complete <- read.csv("C:\\Users\\alaurencetraynor\\Documents\\LMF\\RPA\\2022 National Report\\LMF_estimates_2011_2021_byState_for_figures.csv")
+
+# make sure varibale are the right type
+states_complete$Year <- format(as.Date(as.character(states_complete$Year), "%Y"),"%Y")
+
+# fill in zeros for NAs
+states_complete$Number.of.BLM.range.observed.points[is.na(states_complete$Number.of.BLM.range.observed.points)] <- 0
+
+states_complete <- states_complete %>% 
+  filter(State != "MT.ND.SD",
+          State != "OR.WA") %>% 
+  mutate(caption = ifelse(is.na(caption), " ", caption),
+         State = ifelse(State == "All.BLM.Range", "All BLM Range", State
+                        ))
+# order for table columns
+col_list <- c("Estimate",
+              "Confidence Interval Lower Bound",
+              "Confidence Interval Upper Bound",
+              "Points Sampled")
+
+# order levels for year
+
+# create nice order
+cols_order <- unlist(lapply(unique(states_complete$State), function(x) paste(x, col_list, sep = "_")))
+  
+## Create Tables list
+
+list_of_plots <- lapply(X = split(states_complete, states_complete[["index"]]), FUN = function(data){
+ current_plot <-  data %>% 
+   select(State,
+          Year,
+          Estimate,
+          CI_Lower2,
+          CI_Upper2,
+          Number.of.BLM.range.observed.points,
+          figure_title) %>% 
+   unique() %>% 
+   rename(`Confidence Interval Lower Bound` = CI_Lower2,
+          `Confidence Interval Upper Bound` = CI_Upper2,
+          `Points Sampled` = Number.of.BLM.range.observed.points) %>% 
+   pivot_wider(names_from = State,
+               values_from = c(Estimate,
+                               `Confidence Interval Lower Bound`,
+                               `Confidence Interval Upper Bound`,
+                               `Points Sampled`),
+               names_glue = "{State}_{.value}") %>% 
+   select(c("Year", all_of(cols_order), "figure_title")) %>% 
+   gt() %>% 
+   tab_header(title = unique(data$figure_title)) %>% 
+   cols_hide(figure_title) %>% 
+   tab_spanner_delim(delim = "_")  
+   
+    return(current_plot)
+  
+})
+
+```
+
+```{r fig 1, echo = FALSE , fig.height = 12 , fig.width = 14}
+
+for(i in 1:121){
+  print(list_of_plots[[i]])
+}
+  
+```
+
+```{r}
+print(list_of_plots[[1]])
+```
+

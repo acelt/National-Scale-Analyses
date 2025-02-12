@@ -1,0 +1,1047 @@
+---
+title: "Tortoise ACEC"
+author: "Alex Laurence-Traynor"
+date: "9/28/2023"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(arcgisbinding)
+library(arcgis)
+arc.check_product()
+library(sf)
+library(terradactyl)
+library(raster)
+library(terra)
+library(RODBC)
+library(daymetr)
+```
+
+```{r set parameters}
+gdb <- "\\\\blm\\dfs\\loc\\GBP\\OC\\gis_users_scratch\\alaurencetraynor\\My Documents\\ArcGIS\\Tortoise\\Tortoise\\Tortoise.gdb"
+points <- "AIMLMF_habitat_R_tca"
+aoi <- "USFWS_TCAs"
+group_field <- "G0_group"
+year_range <- 2019:2023
+species_points <-  "Species_clip2"
+species_lut <- "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\MDT_LPI_detail.csv"
+sde <- "\\\\blm.doi.net\\dfs\\loc\\EGIS\\ProjectsNational\\AIM\\AIMDataTools\\SDE\\AIMTerrestrialPub.sde"
+habitat <- "NussearHabitat_dissolve"
+sf_use_s2(FALSE)
+```
+
+
+```{r import data}
+# points
+points <- st_read(dsn = gdb, layer = points)
+species <- st_read(dsn = gdb, layer = species_points)
+
+# polygons
+aoi <- st_read(dsn = gdb, layer = aoi)
+aoi$area <- units::set_units(st_area(aoi), "acre")
+
+# Habitat
+habitat_poly <- st_read(dsn = gdb, layer = habitat)
+```
+
+```{r dates}
+# date visited/plot count 
+# for all tortoise habitat
+points$Year <- format(points$DateVisited,format = "%Y")
+points$Month <- format(points$DateVisited,format = "%B")
+
+# filter by date range
+points <- points[points$Year %in% year_range,]
+
+points$Month <- factor(as.factor(points$Month), levels = c("March", "April", "May","June", "July", "August", "September", "October"))
+
+points <- points %>% 
+  mutate("AIMLMF" = ifelse(ProjectName == "LMF", "LMF", "AIM"))
+
+points$AIMLMF[is.na(points$ProjectName)] = "AIM"
+
+names(points)[names(points) == group_field] <- "Group" # may want to reGroup this somehitng more interesting later
+
+names(aoi)[names(aoi) == group_field] <- "Group"
+```
+
+```{r climate data, eval = FALSE}
+# Precip data
+# I have the mean daily precip and tmax from daymet from April-october for 2011-2022
+#climate_path <- "C:\\Users\\alaurencetraynor\\Documents\\Mojave Desert Tortoise\\Climate\\DayMet_climate-20231002T213145Z-001\\DayMet_climate"
+
+# change this projection to LCC to mathc daymet
+
+xy <- st_coordinates(points)
+points <- cbind(points, xy)
+
+max_year <- max(points$Year)
+min_year <- min(points$Year)
+
+# Loop to grab data for all AIM plots
+get_daymet <- function(i){
+  
+  temp_lat <- points[i, ] %>% pull(Y)
+  temp_lon <- points[i, ] %>% pull(X)
+  temp_site <- points[i, ] %>% pull(PrimaryKey)
+  min_year <-  points[i,"DateVisited"]
+  max_year <- format(min_year$DateVisited, "%Y")
+  min_year <- max_year-1 # getting data from teh year before as well
+  
+  temp_daymet <- download_daymet(
+    lat = temp_lat,
+    lon = temp_lon,
+    start = min_year,
+    end = max_year
+  ) %>% 
+    #--- just get the data part ---#
+    .$data %>% 
+    #--- convert to tibble (not strictly necessary) ---#
+    as_tibble() %>% 
+    #--- assign site_id so you know which record is for which site_id ---#
+    mutate(PrimaryKey = temp_site) %>% 
+    #--- get date from day of the year ---#
+    mutate(date = as.Date(paste(year, yday, sep = "-"), "%Y-%j"))
+  
+  return(temp_daymet)
+}  
+
+daymet_all_points <- lapply(1:nrow(points), get_daymet) %>% 
+    #--- need to combine the list of data.frames into a single data.frame ---#
+    bind_rows()
+
+# save this too
+write.csv(daymet_all_points, paste0("C:\\Users\\alaurencetraynor\\Documents\\National\\daymet_points_", Sys.Date(), ".csv"))
+
+# this is huge -  add date/year visted to subset to data from teh uyear of sampling
+daymet_all_points <- daymet_all_points %>% 
+  left_join(y = points[,c("PrimaryKey", "DateVisited")], by = "PrimaryKey") %>% 
+  mutate(YearVisited = format(DateVisited, "%Y")) %>% 
+  filter(YearVisited == year)
+
+write.csv(daymet_all_points, "\\\\blm.doi.net\\dfs\\loc\\egis\\GISUsers\\alaurencetraynor.BLM\\My Documents\\ArcGIS\\Tortoise\\Tortoise\\day_met_points.csv")
+
+# convert numbers to date
+#daymet_all_points <- mutate(daymet_all_points, date = as.Date(paste(year, yday, sep = "-"), "%Y-%j"))
+# summarise data by month etc.,
+daymet_all_points <- mutate(daymet_all_points,
+  day = day(date),
+  month = month(date),
+  #--- this is already there though ---#
+  year = year(date)
+)
+
+daymet_monthly <- daymet_all_points %>% 
+  group_by(PrimaryKey, year, month) %>% 
+  summarize(prcp = mean(prcp..mm.day.),
+            srad = mean(srad..W.m.2.),
+            swe = mean(swe..kg.m.2.),
+            tmax = mean(tmax..deg.c.),
+            tmin = mean(tmin..deg.c.),
+            vp = mean(vp..Pa.))
+
+# recent climate is probably the most relevant to the veg data
+# calc seasonal means
+# winter = novembver to april
+winter <- c(11,12,1,2,3,4)
+# summer = april to november
+summer <- c(5,6,7,8,9,10)
+
+# lets summarise this 
+daymet_seasonal <- daymet_all_points %>% 
+  mutate(season = ifelse(month %in% winter, "Winter", "Summer")) %>% 
+  group_by(season, year, PrimaryKey) %>% 
+  summarize(prcp = mean(prcp..mm.day.),
+            srad = mean(srad..W.m.2.),
+            swe = mean(swe..kg.m.2.),
+            tmax = mean(tmax..deg.c.),
+            tmin = mean(tmin..deg.c.),
+            vp = mean(vp..Pa.))
+
+# would be good to actually summarise this by recovery unit
+daymet_seasonal_ru <- daymet_all_points %>% 
+  left_join(y = points_df[,c("PrimaryKey", "Group")], by = "PrimaryKey") %>% 
+  mutate(season = ifelse(month %in% winter, "Winter", "Summer")) %>% 
+  group_by(season, year, Group, PrimaryKey) %>% 
+  summarize(prcp = mean(prcp..mm.day.),
+            srad = mean(srad..W.m.2.),
+            swe = mean(swe..kg.m.2.),
+            tmax = mean(tmax..deg.c.),
+            tmin = mean(tmin..deg.c.),
+            vp = mean(vp..Pa.)) %>% 
+  filter(!is.na(Group))
+
+```
+
+
+```{r check metadata}
+# focus on invasive species
+# 
+# look a
+ggplot(data = points, aes(x = Year, fill = Group))+
+  geom_bar(position = "stack")+
+  theme_bw()+
+  #scale_x_datetime(date_breaks = "1 year", date_labels = "%Y")+
+ # facet_wrap(.~Group)+
+  theme(axis.text.x = element_text(angle = 30, vjust =0.5), legend.title = element_blank())+
+  labs(x = "", y = "Count of AIM Plots")
+
+# By month
+ggplot(data = points, aes(x = Month))+
+  geom_bar()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 30, vjust =0.5), legend.position = "none")+
+  facet_wrap(.~Group)+
+  labs(y = "Count of AIM Plots")
+
+# subset to acec
+ggplot(data = points, aes(x = DateVisited, y = Group, col = Year))+
+  geom_boxplot()+
+  theme_bw()+
+  scale_x_datetime(date_breaks = "1 year", date_labels = "%Y")+
+  theme(axis.text.x = element_text(angle = 30, vjust =0.5), legend.position = "none")
+
+# By month
+ggplot(data = points, aes(x = Month))+
+  geom_bar()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 30, vjust =0.5), legend.position = "none")+
+  labs(y = "Count of AIM Plots")
+
+# tortoises live for 25 years...
+
+# join acres to aim points
+# remove geometry first
+points_df <- st_drop_geometry(points)
+
+points_df <- merge(x = points_df,
+                       y = aoi[,c("Group", "area")],
+                       by = "Group",
+                   all.x = TRUE,
+                   all.y = FALSE)
+
+#count of points / acres
+acec_summary <- points_df %>%
+  group_by(Group) %>%
+  summarise(plotcount = n(),
+            total_acres = sum(area)) %>%
+  mutate(pointsperacre = plotcount/total_acres,
+         acresperpoint = total_acres/plotcount)
+
+acec_summary$acresperpoint
+```
+
+```{r}
+# count of plots by acec
+count <- by(points, points$Group, nrow)
+```
+
+```{r indicator calc, eval=FALSE}
+# look at species
+species_list <-  unique(species$Species)
+sort(species_list)
+
+# load that list of prefered forbs
+mdt_forbs <- read.csv("\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\MDT forbs_fixed_complete.csv")
+
+# filter to only use Esque's list of natives only
+mdt_forbs <- mdt_forbs[mdt_forbs$Group %in% c("Favourite Native","Forage Native"),]
+
+# # join to tblstate species to find codes
+state_species <-  st_read(dsn = gdb, layer = "tblStateSpecies")
+# 
+# mdt_forbs <- merge(x = mdt_forbs,
+#                    y = state_species[,c("ScientificGroup", "SpeciesCode")],
+#                    by.x = "Species",
+#                    by.y = "ScientificGroup",
+#                    all.x = TRUE,
+#                    all.y = FALSE)
+# 
+# mdt_forbs$code <- mdt_forbs$SpeciesCode
+# EXPORT AND FILL IN THE REST IN CSV
+
+#write.csv(mdt_forbs, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\MDT forbs_fixed.csv")
+
+# THERES also several genus codes we need to deal with
+# I think create a separate list of these and flag any species scientifica Groups that start with them in teh dataset
+genus_codes <- mdt_forbs$Species[grepl("*sp\\.", mdt_forbs$Species)]
+# remove the 'sp.'
+genus_codes <- gsub("sp\\.", "", genus_codes)
+# also make sure theres no white space
+genus_codes <- gsub(" ", "", genus_codes)
+
+# now look up all species that start with these
+# need to join species list
+species <- species[species$PrimaryKey %in% points$PrimaryKey,]
+
+species_merge <- merge(x = species,
+                 y = state_species[, c("SpeciesCode", "ScientificName")],
+                 by.x = "Species",
+                 by.y = "SpeciesCode",
+                 all.x = TRUE,
+                 all.y = FALSE)
+
+# # function for partial match from a list
+# `%rin%` = function (pattern, list) {
+#      vapply(pattern, function (p) any(grepl(p, list)), logical(1L), USE.GroupS = FALSE)
+# }
+# 
+# genera_codes <- species_merge %>% 
+#   st_drop_geometry() %>% 
+#   dplyr::select(Species, ScientificGroup) %>% 
+#   filter(ScientificGroup %rin% genus_codes) %>% 
+#   unique() %>% 
+#   reGroup(code = Species)
+# 
+# mdt_forbs <- mdt_forbs %>% 
+
+# also need all the species related to these genera
+species <- species_merge %>% 
+  dplyr::select(c(ScientificGroup,Species)) %>% 
+  st_drop_geometry() %>% 
+  unique()
+
+missing_genera <- lapply(genus_codes, function(x){
+  y <- species[grepl(paste0(x,"*"), species$ScientificGroup),]
+  return(y)
+}) %>% 
+  bind_rows() %>% 
+ unique()%>% 
+  reGroup(code = Species)
+
+# append this to the other preffered forb list
+mdt_forbs <- mdt_forbs %>% 
+  #bind_rows(missing_genera) %>% 
+  filter(!is.na(code),
+         code != "")
+
+write.csv(mdt_forbs, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\MDT forbs_fixed_complete.csv")
+
+# I deally we also run this thorugh Patricks synomym list
+# Create connection to SQL database
+#con1 <-  odbcConnect("AIMPub", rows_at_time = 1)
+```
+
+```{r indicator calcs, eval = FALSE}
+## WE'LL HAVE TO USE ARCGISBINDING SINCE THE SQL CONNECTION IS BROKEN
+## Look at AIM SDE structure
+#odbcGetInfo(con1)
+#Tables <- sqlTables(con1)
+token <- auth_binding()
+set_arc_token(token)
+
+# Import terrestrial data
+terradat <- arc_open(url = "https://gis.blm.doi.net/arcgis/rest/services/vegetation/BLM_Natl_AIM_TerrADatAndLMF/FeatureServer/2",
+                     token = token)
+lmf <- arc_open("https://gis.blm.doi.net/arcgis/rest/services/vegetation/BLM_Natl_AIM_TerrADatAndLMF/FeatureServer/5",
+                 token = token)
+# # create query firs so were not pulling allll records
+# pkString <- toString(sprintf("'%s'", points$PrimaryKey))
+# sql_fmt <- "SELECT * FROM PrimaryKey IN (%s)"
+# query <- sprintf(sql_fmt, pkString)
+
+# THIS ISNT WORKING :()
+# its failing becuase the results is too large, see: https://support.esri.com/en-us/knowledge-base/error-performing-query-operation-1462482758126-000011736
+
+# Instead ill filter by geometry
+acec_bbox <- st_bbox(aoi)
+  
+terradat_df <- arc_select(x = terradat, filter_geom = acec_bbox)
+lmf_df <- arc_select(lmf, filter_geom = acec_bbox)
+
+terradat_df <- terradat_df[terradat_df$PrimaryKey %in% points$PrimaryKey,]
+lmf_df <- lmf_df[lmf_df$PrimaryKey %in% points$PrimaryKey,]
+
+# grab LPI detail from terradat
+# arcgis isnt working for this for resorting to arcgisbinidng
+
+terradat_lpi <- st_read(dsn = gdb, layer = "tblLPIDetail")
+
+terradat_lpi <- terradat_lpi[terradat_lpi$PrimaryKey %in% points$PrimaryKey,]
+
+write.csv(terradat_lpi, "C:\\Users\\alaurencetraynor\\Downloads\\lpi_detail_MDT_ACEC.csv")
+
+# grab lpi header info - terradactyl function wants this
+tbllpiheader <- st_read(dsn = gdb, layer = "tblLPIHeader")
+
+tbllpiheader <- tbllpiheader[tbllpiheader$PrimaryKey %in% points$PrimaryKey,]
+
+# only need these two fields
+tbllpiheader <- tbllpiheader[,c("LineKey", "RecKey")]
+
+# Make tall
+tdat_tall <- tidyr::pivot_longer(data = terradat_lpi,
+                                 cols = c(TopCanopy:SoilSurface),
+                                 Groups_to = "layer",
+                                 values_to = "code")
+
+# merge detail with line info for terradactyl
+tdat_tall <- merge(x = tdat_tall,
+                   y = tbllpiheader,
+                   by = "RecKey",
+                   all.x = T,
+                   all.y = F)
+
+tdat_tall <- tdat_tall[,c("PrimaryKey", "layer", "code", "PointNbr", "LineKey")]
+
+# Calc field for soil crust
+tdat_tall$MDT_forbs <- "NotPreferred"
+tdat_tall[tdat_tall$code %in% mdt_forbs$code, "MDT_forbs"] <- "Preferred" 
+
+# calc AH cover
+aim_cover_MDT <- terradactyl::pct_cover(lpi_tall = tdat_tall,
+                                        tall = F,
+                                        hit = "any",
+                                        by_line = F,
+                                        MDT_forbs)
+# Now repeat everything for LMF raw data
+
+# grab LPI detail from lmf
+lmf_lpi <- st_read(dsn =gdb, layer = "pintercept")
+lmf_lpi <- lmf_lpi[lmf_lpi$PrimaryKey %in% points$PrimaryKey,]
+
+lmf_tall <- terradactyl::gather_lpi_lmf(PINTERCEPT = lmf_lpi)
+
+lmf_tall$MDT_forbs <- "NotPreferred"
+lmf_tall[lmf_tall$code %in% mdt_forbs$code, "MDT_forbs"] <- "Preferred"  
+
+lmf_cover_MDT <- terradactyl::pct_cover(lpi_tall = lmf_tall,
+                                        tall = F,
+                                        hit = "any",
+                                        by_line = F,
+                                        MDT_forbs)
+
+#Combine AIM and LMF
+aim_lmf_MDT <- rbind(lmf_cover_MDT, aim_cover_MDT)
+
+# Adding indicator for just presence of BSC
+aim_lmf_MDT$MDT_present <- "FALSE"
+aim_lmf_MDT[aim_lmf_MDT$PREFERRED>0,"MDT_present"] <- "TRUE"
+
+# merge with other indicators
+points_forb <- merge(x= points,
+                     y = aim_lmf_MDT,
+                     by = "PrimaryKey")
+
+#write.csv(aim_lmf_MDT, "C:\\Users\\alaurencetraynor\\Documents\\MDT_forb_cover.csv")
+
+# run again for preffered/favourite
+fave_forbs <- mdt_forbs[mdt_forbs$Group == "Favourite Native",]
+
+# Calc field for soil crust
+tdat_tall$fave_forbs <- "NotFavourite"
+tdat_tall[tdat_tall$code %in% fave_forbs$code, "fave_forbs"] <- "Favourite" 
+
+# calc AH cover
+aim_cover_fave <- terradactyl::pct_cover(lpi_tall = tdat_tall,
+                                        tall = F,
+                                        hit = "any",
+                                        by_line = F,
+                                        fave_forbs)
+# Now repeat everything for LMF raw data
+
+# grab LPI detail from lmf
+lmf_tall$fave_forbs <- "NotFavourite"
+lmf_tall[lmf_tall$code %in% mdt_forbs$code, "fave_forbs"] <- "Favourite"  
+
+lmf_cover_fave <- terradactyl::pct_cover(lpi_tall = lmf_tall,
+                                        tall = F,
+                                        hit = "any",
+                                        by_line = F,
+                                        fave_forbs)
+
+#Combine AIM and LMF
+aim_lmf_fave <- rbind(lmf_cover_fave, aim_cover_fave)
+
+# Adding indicator for just presence of BSC
+aim_lmf_fave$fave_present <- "FALSE"
+aim_lmf_fave[aim_lmf_fave$FAVOURITE>0,"fave_present"] <- "TRUE"
+
+# merge with other indicators
+points_forb2 <- merge(x= points_forb,
+                     y = aim_lmf_fave,
+                     by = "PrimaryKey")
+
+# run again for worse invasives 
+# red brome, schizmus, cheatgrass, sahara mustard, african mustard
+invasives <- c("BRRU2","SCAR","BRTE", "BRTO")
+
+# Calc field for soil crust
+tdat_tall$mdt_invasive <- "NotInvasive"
+tdat_tall[tdat_tall$code %in% invasives, "mdt_invasive"] <- "MDTInvasive" 
+
+# calc AH cover
+aim_cover_invasive <- terradactyl::pct_cover(lpi_tall = tdat_tall,
+                                        tall = F,
+                                        hit = "any",
+                                        by_line = F,
+                                        mdt_invasive)
+# Now repeat everything for LMF raw data
+
+# grab LPI detail from lmf
+lmf_tall$mdt_invasive <- "NotInvasive"
+lmf_tall[lmf_tall$code %in% invasives, "mdt_invasive"] <- "MDTInvasive"  
+
+lmf_cover_invasive <- terradactyl::pct_cover(lpi_tall = lmf_tall,
+                                        tall = F,
+                                        hit = "any",
+                                        by_line = F,
+                                        mdt_invasive)
+
+#Combine AIM and LMF
+aim_lmf_invasive <- rbind(lmf_cover_invasive, aim_cover_invasive)
+
+# Adding indicator for just presence of BSC
+aim_lmf_invasive$invasive_present <- "FALSE"
+aim_lmf_invasive[aim_lmf_invasive$MDTINVASIVE>0,"invasive_present"] <- "TRUE"
+
+# merge with other indicators
+points_forb3 <- merge(x= points_forb2,
+                     y = aim_lmf_invasive,
+                     by = "PrimaryKey")
+
+points_forb3_df <- st_drop_geometry(points_forb3) %>% 
+  dplyr::select(-(GDB_GEOMATTR_DATA))
+
+write.csv(points_forb3_df, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\AIM_LMF_MDTCalcs.csv")
+```
+
+```{r}
+points_forb <- read.csv("\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\AIM_LMF_MDTCalcs.csv")
+points_df$TCA <- points_df$stratum_de
+# join to get habitat and TCA
+
+points_forb <- merge(x = points_forb,
+                     y = points_df[,c("PrimaryKey", "FID_RecoveryUnits_2010", "TCA")],
+                     by = 'PrimaryKey',
+                     all.x = TRUE)
+  
+# plotting forbs
+ggplot(points_forb[!is.na(points_forb$TCA),], aes(x = TCA, y = PREFERRED, fill = TCA))+
+  geom_boxplot()+
+  geom_jitter(alpha=0.2, width = 0.2, size = 1)+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "MDT Forage Cover (%)",
+       fill = "TCA")
+
+# same but for favourites
+ggplot(points_forb3[!is.na(points_forb3$Group),], aes(x = Group, y = FAVOURITE, fill = Group))+
+  geom_boxplot()+
+  geom_jitter(alpha=0.2, width = 0.2, size = 1)+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Preferred Forage Cover (%)",
+       fill = "Recovery Unit")
+
+# and invasives
+ggplot(points_forb3[!is.na(points_forb3$Group),], aes(x = Group, y = MDTINVASIVE, fill = Group))+
+  geom_boxplot()+
+  geom_jitter(alpha=0.2, width = 0.2, size = 1)+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "MDT Invasive Cover (%)",
+       fill = "Recovery Unit")
+```
+
+```{r summarise indicators}
+# native forbs, non native forbs(maybe relative?), non native grass, forb abundance? Shrub cover, diversity/species richness,
+ggplot(points[!is.na(points$Group),], aes(x = Group, y = AH_NonNoxAnnForbCover, fill =Group))+
+  geom_boxplot()+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Native Annual Forb Cover (%)")
+
+ggplot(points[!is.na(points$Group),], aes(x = Group, y = AH_NoxAnnGrassCover, fill =Group))+
+  geom_boxplot()+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Non-Native Annual Grass Cover (%)")
+
+
+ggplot(points[!is.na(points$Group),], aes(x = Group, y = AH_ForbCover, fill =Group))+
+  geom_boxplot()+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Annual Forb Cover (%)")
+
+ggplot(points[!is.na(points$Group),], aes(x = Group, y = AH_ShrubCover, fill =Group))+
+  geom_boxplot()+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Shrub Cover (%)")
+
+ggplot(points[!is.na(points$Group),], aes(x = Group, fill =Group))+
+  geom_boxplot(aes(y = NumSpp_NoxPlant), fill = "purple", alpha = 0.4)+
+  geom_boxplot(aes(y = NumSpp_NonNoxPlant), alpha = 0.4, fill = "orange")+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Species Count")+
+  scale_fill_discrete(labels = c("Noxious", "Non-Noxious"))
+
+# list of preferred forbs
+
+# estimate surface - interpolation of species data
+
+# using soil maps and running interpolation separately for each
+
+# run for different soils/ecosites (clayey sites have higher susceptibility)
+
+# species lists/cover by date
+ # tables
+library(gt)
+indicators <- c("NumSpp_NoxPlant","NumSpp_NonNoxPlant","AH_ShrubCover","PREFERRED", "FAVOURITE", "FH_RockCover","MDTINVASIVE")
+
+ind_summary <- points_forb %>% 
+  dplyr::select(all_of(indicators),
+         TCA) %>% 
+  group_by(TCA) %>% 
+  summarise(across(everything(), mean, na.rm = TRUE))
+
+write.csv(ind_summary, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\ind_summary_tca.csv")
+
+total_count <- length(unique(points_forb$PrimaryKey))
+
+count_summary <- points_forb %>% 
+  dplyr::select(MDT_present,
+                fave_present,
+                invasive_present,
+                TCA) %>% 
+  group_by(TCA) %>% 
+  summarise(forage = sum(as.logical(MDT_present)),
+            fave = sum(as.logical(fave_present)),
+            invasive = sum(as.logical(invasive_present)))
+
+by(as.logical(points_forb3_df$MDT_present), points_forb3_df$Group, sum, na.rm = TRUE)
+
+write.csv(count_summary, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\count_summary_TCA.csv")
+
+# Looking at abundance
+abundance_summary <- points_forb %>% 
+  mutate(forage_abundance = ifelse(PREFERRED>=15, TRUE, FALSE),
+         fave_abundance = ifelse(FAVOURITE>=15, TRUE, FALSE),
+         invasive_abundance = ifelse(MDTINVASIVE>=15, TRUE, FALSE)) %>% 
+  dplyr::select(forage_abundance,
+                fave_abundance,
+                invasive_abundance,
+                TCA) %>% 
+  group_by(TCA) %>% 
+  summarise(forage = sum(as.logical(forage_abundance)),
+            fave = sum(as.logical(fave_abundance)),
+            invasive = sum(as.logical(invasive_abundance)),
+            n = n()) %>% 
+  mutate(forage_p = forage/n,
+         fave_p = fave/n,
+         invasive_p = invasive/n) %>% 
+  dplyr::select(-c(forage, fave, invasive))
+
+write.csv(abundance_summary, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\abundance_summary_TCA.csv")
+
+points_forb <- points_forb %>% 
+  mutate(Habitat = ifelse(is.na(FID_NussearHabitat_RUclip),"FALSE", "TRUE"))
+
+write.csv(points_forb, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\points_forb_9424.csv")
+```
+
+# Species summary
+```{r}
+species_summary <- species %>% 
+  filter(PrimaryKey %in% points_df$PrimaryKey) %>% 
+  st_drop_geometry() %>% 
+  left_join(y = points[,c("PrimaryKey","Group")], by = "PrimaryKey")
+
+# subset
+species_summary_list <- split(species_summary, species_summary$Group)
+
+species_summary <- function(x){
+  y <- x %>%
+    group_by(Species) %>% 
+    summarise(Mean_Cover = mean(AH_SpeciesCover)) %>% 
+    arrange(desc(Mean_Cover)) %>% 
+    dplyr::select(Species, Mean_Cover) %>% 
+    left_join(y = unique(state_species[,c("SpeciesCode", "ScientificName")]), by = c("Species"="SpeciesCode"))%>% 
+    filter(!is.na(ScientificName)) %>% # REMOVE UNKOWNS
+    head(n = 10) %>% 
+    ungroup()
+  
+  return(y)
+}
+species_summary_final_list <- lapply(species_summary_list, species_summary)
+species_summary_final <- lapply(species_summary_list, species_summary) %>% 
+  bind_cols()
+  
+write.csv(species_list_summary_final, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\species_summary.csv")
+```
+
+```{r}
+# First lets make an index based on forage and invasives
+points_forb3 <- points_forb %>% 
+  mutate(HabitatQuality = (1+PREFERRED)/(1+MDTINVASIVE),
+         HabitatQuality2 =(PREFERRED/MDTINVASIVE))
+
+# create summary table for this indicator too
+# for both TCA and RU
+tca_qual <- points_forb3 %>% 
+  group_by(TCA) %>% 
+  summarise(Mean_Habitat_Quality = mean(HabitatQuality))
+
+ru_qual <- points_forb3 %>% 
+  group_by(Group) %>% 
+  summarise(Mean_Habitat_Quality = mean(HabitatQuality))
+
+write.csv(tca_qual, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\tca_qual.csv")
+
+write.csv(ru_qual, "\\\\blm.doi.net\\dfs\\nr\\users\\alaurencetraynor\\My Documents\\Analysis\\Mojave Desert Tortoise\\ru_qual.csv")
+
+summary(points_forb3$HabitatQuality)
+
+ggplot(points_forb3[!is.na(points_forb3$Group),], aes(x = Group, y = HabitatQuality, fill = Group))+
+  geom_boxplot(outliers =FALSE)+
+  geom_jitter(alpha=0.2, width = 0.2, size = 1)+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Preferred Forbs/MDT Invasive Ratio",
+       fill = "Recovery Unit")
+
+ggplot(points_forb3[!is.na(points_forb3$TCA),], aes(x = TCA, y = HabitatQuality, fill = TCA))+
+  geom_boxplot(outliers =FALSE)+
+  geom_jitter(alpha=0.2, width = 0.2, size = 1)+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(x = "", y = "Preferred Forbs/MDT Invasive Ratio",
+       fill = "TCA")
+
+#Lets look at this spatially
+ggplot()+
+  geom_sf(data = aoi)+
+  geom_sf(data = points_forb3, aes(col = HabitatQuality),inherit.aes = FALSE)+
+  scale_color_continuous(type = "viridis")+
+  theme_void()
+```
+
+```{r}
+# now the same but focused on a single ACEC
+points_subset <- points_forb[points_forb$Group == acec_Group & !is.na(points_forb$Group),]
+
+points_subset <- points_subset[,c("AH_NonNoxAnnForbCover","AH_NoxAnnGrassCover", "AH_ForbCover", "AH_ShrubCover","PREFERRED", "PrimaryKey", "Group", "Year")]
+
+subset_tall <- pivot_longer(points_subset, cols = c("AH_NonNoxAnnForbCover","AH_NoxAnnGrassCover", "AH_ForbCover", "AH_ShrubCover","PREFERRED"), Groups_to = "Indicator", values_to = "Cover")
+
+ggplot(subset_tall, aes(x = Group, y = Cover, fill = Indicator))+
+  geom_boxplot()+
+  theme_bw()+
+  scale_fill_brewer(type = "qual")
+```
+
+```{r}
+species_subset <- species[species$PrimaryKey %in% points_subset$PrimaryKey,]
+
+```
+
+```{r additional indicators}
+# % rock fragment
+ggplot(points_forb3_df, aes(x = Group, y = FH_RockCover, fill = Group))+
+  geom_boxplot()+
+  theme_bw()+
+  scale_fill_brewer(type = "qual")+
+  geom_jitter(alpha=0.2, width = 0.2, size = 1)+
+  theme_bw(base_size = 14)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+nrow(points_df[is.na(points_df$Group),])
+# depth to bedrock
+
+# species richness
+```
+
+```{r exploring climate relationships, eval=FALSE}
+# spread season and maybe year first so we can join both to points
+daymet_seasonal_ru_wide <- daymet_seasonal_ru %>% 
+  pivot_wider(names_from =c(season),
+              values_from = c(prcp:vp))
+
+daymet_seasonal_ru_xtrawide <- daymet_seasonal_ru %>% 
+  pivot_wider(names_from =c(season, year),
+              values_from = c(prcp:vp))
+
+# so this is the regional climate
+# join seasonal indicator back to points
+points_climate <- merge(x = points_forb3_df,
+                        y = daymet_seasonal_ru_wide,
+                        all.x = TRUE,
+                        by.x = c("Group", "Year"),
+                        by.y = c("Group", "year")) # joining by year but the winter in the previous year might be more telling
+
+points_climate2 <- merge(x = points_climate,
+                        y = daymet_seasonal_ru_xtrawide,
+                        all.x = TRUE,
+                        by.x = "Group",
+                        by.y = "Group")
+
+# can also add plot specific climate
+daymet_seasonal_plot <- daymet_all_points %>% 
+  mutate(season = ifelse(month %in% winter, "Winter", "Summer")) %>% 
+  group_by(season, year, PrimaryKey) %>% 
+  summarize(prcp_plot = sum(prcp..mm.day.),
+            srad_plot = sum(srad..W.m.2.),
+            swe_plot = sum(swe..kg.m.2.),
+            tmax_plot = sum(tmax..deg.c.),
+            tmin_plot = sum(tmin..deg.c.),
+            vp_plot = sum(vp..Pa.)) %>% 
+  pivot_wider(names_from = season,
+              values_from = c(prcp_plot:vp_plot))
+
+points_climate3 <- merge(x = points_climate2,
+                        y = daymet_seasonal_plot,
+                        all.x = TRUE,
+                        by.x = "PrimaryKey",
+                        by.y = "PrimaryKey")
+
+# ok lets plot this and regress
+ggplot(data = points_climate3, aes(x = FAVOURITE, y = prcp_plot_Summer))+
+  geom_point()
+# defining some zero inflation
+
+# classic transformation for proportional data is arcsine
+points_climate3$FAVOURITE_trans <- asin(sqrt(points_climate3$FAVOURITE/100))
+shapiro.test(points_climate3$FAVOURITE_trans) # The p-value is less than .05, which indicates that the data is NOT normally distributed
+# this is better
+
+ggplot(data = points_climate3, aes(x = FAVOURITE_trans, y = prcp_plot_Summer))+
+  geom_point()
+
+
+ggplot(data = points_climate3, aes(x = PREFERRED, y = prcp_plot_Summer))+
+  geom_point()
+
+ggplot(data = points_climate3, aes(x = PREFERRED, y = tmax_plot_Summer))+
+  geom_point()
+
+# also can just plot climate by recovery unit
+ggplot(data = daymet_seasonal_ru, aes(x = year, y = prcp/10, col = season))+
+  geom_path()+
+  facet_wrap(.~Group)+
+  theme_bw()+
+  labs(x = element_blank(), y = "Mean Seasonal Precipitation (cm)", col = "Season")
+```
+
+
+```{r calculating and looking at diversity}
+
+```
+# Road impacts
+```{r examining road impacts}
+library(terra) #or should I use terra?
+        
+#import road layer
+esri_streets <- st_read(dsn = "\\\\blm.doi.net\\dfs\\loc\\egis\\gisusers\\alaurencetraynor.BLM\\My Documents\\ArcGIS\\Tortoise\\Tortoise\\Tortoise.gdb",
+                        layer = "RU_Streets")
+
+# may need to reproject this to get emtric units
+esri_streets <- st_transform(esri_streets, crs = CRS("+init=epsg:9822"))
+
+# create blank raster with extent of roads
+rs <- raster(extent(esri_streets), crs=projection(esri_streets), resolution = 30) #creates the blank raster
+# counts number of roads within each cell
+road.density_count <- rasterize(esri_streets, rs, fun='count', background=0) 
+# alternatively calc the length of the roads with each cell
+road.density_length <- rasterize(esri_streets, rs, fun='length', background=0) 
+
+# convert to km
+road.density_length <- road.density_length * 1000
+# calc area of each cell
+area_rs <- area(road.density_length)
+# convert to km instead of ms
+area_rs <- area_rs/1000
+
+# divide one by the other to get length of roads per area
+road_density2 <- road.density_length/area_rs
+
+writeRaster(road.density_count,"C:\\Users\\alaurencetraynor\\Documents\\Mojave Desert Tortoise\\road_density_count.tiff")
+
+writeRaster(road.density_length,"C:\\Users\\alaurencetraynor\\Documents\\Mojave Desert Tortoise\\road_density_length.tiff")
+
+writeRaster(road_density2,"C:\\Users\\alaurencetraynor\\Documents\\Mojave Desert Tortoise\\road_density.tiff",overwrite=TRUE)
+
+# reclassify the raster to 3 categories 
+# 0.75km/km2 is the threshold mentioned in the tortise paper
+reclass <- matrix(c(0, 0.75, 1,
+                    0.75, 5, 2),ncol=3,byrow=TRUE)
+
+road_density_reclass <- raster::reclassify(x =road_density2,rcl = reclass)
+writeRaster(road_density_reclass,"C:\\Users\\alaurencetraynor\\Documents\\Mojave Desert Tortoise\\road_density_reclass2.tiff",overwrite=TRUE)
+
+# Join to points to get summary stats for each class
+points$class <- terra::extract(road_density_reclass,points, ID =TRUE, method = "simple")
+
+points_forb_rd <- merge(x = st_drop_geometry(points)[,c("class","PrimaryKey")],
+                     y = points_forb,
+                     by = "PrimaryKey")
+                     
+ggplot(points_forb_rd, aes(y = MDTINVASIVE, x = as.factor(class)))+
+  geom_boxplot()
+
+road_density_summary <- points_forb_rd %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(all_of(indicators),
+         class) %>% 
+  group_by(class) %>% 
+  summarise(across(everything(), mean, na.rm = TRUE))
+
+```
+
+```{r remote sensing?}
+# Summary of RAP data and precip/tmax
+
+```
+
+```{r}
+# grab climate rasters, subset to acec poly and plot trend
+raster_list <- list()
+
+for(i in 2011:2022){
+  index <- paste0("DayMet_climate_",as.character(i))
+  file_path <- paste0(climate_path, "/", index,".tif")
+  raster_list[index] <- terra::rast(file_path)
+}
+plot(raster_list[[1]])
+
+# want to make sure the two have same crs
+
+acec_crs <- st_crs(acec_fc_data_sf)[1]$input
+
+clip_raster <- function(raster){
+  raster_proj <- terra::project(x = raster, y = acec_crs)
+  #clipped_raster <- crop(raster_proj, acec_fc_data_sf, mask = TRUE)
+  clipped_raster <- mask(raster_proj, acec_fc_data_sf)
+}
+
+clipped_raster_list <- lapply(raster_list, clip_raster)
+
+# calc mean and stdev for each of these (for both bands) and put in a data frame
+summary_list <- lapply(clipped_raster_list, terra::summary)
+
+summary_list2 <-
+  mapply(`[<-`, summary_list, 'Year', value = Groups(summary_list), SIMPLIFY = FALSE)
+
+summary_df <- do.call("rbind", summary_list2)
+
+summary_df <- as.data.frame(summary_df) 
+
+summary_df <- summary_df %>% 
+  reGroup(precip_min = V1,
+         precip_q1 = V2,
+         precip_q2 = V3,
+         precip_mean = V4,
+         precip_q3 = V5,
+         precip_max = V6,
+         tmax_min =V8,
+         tmax_q1 = V9,
+         tmax_q2 = V10,
+         tmax_mean = V11,
+         tmax_q3 = V12,
+         tmax_max = V13) %>% 
+  select(-c(V7,V14))
+
+summary_df <- summary_df %>% 
+  mutate(Year = gsub("DayMet_climate_", "", Year))
+
+summary_long <- summary_df %>% 
+  pivot_longer(cols= precip_min:tmax_max, Groups_to = c("variable", "statistic"), Groups_sep = "_")
+
+# now need to remove text in the value field
+
+summary_long <-  summary_long %>% 
+  mutate(value = gsub(".*:", "", value))
+
+summary_long$value <- as.numeric(summary_long$value)
+
+summary_plot <-  summary_long %>% 
+  pivot_wider(Groups_from = variable)
+
+rain <- summary_long[summary_long$variable == "precip"& summary_long$statistic == "mean",]
+temp <- summary_long[summary_long$variable == "tmax"& summary_long$statistic == "mean",]
+
+scale <- max(rain$value)/max(temp$value)
+
+# now plot
+p <- ggplot(mapping = aes(x = Year)) +
+  geom_col(data = rain, aes(y = value), fill = "blue", alpha = 0.7, col = "black")+
+  theme_bw(base_size = 14)+
+  ggtitle("Mean Daily Precipitation and Maximum Temperature (DayMet)")+
+  scale_y_continuous(Group = "Precipitation (mm)",
+                     sec.axis = sec_axis(~./scale, Group = "Temperature (degrees C)" ))+
+  geom_line(data = temp, col = "red", group = 1, aes(y = value* scale),size = 1)
+
+# adding AIM data to this
+ggplot() + geom_boxplot(data = subset_tall, aes(x = Year, y = Cover, fill = Indicator))
+```
+
+```{r synthesize results}
+# how do indiciators relate to climate?
+# have to join points to the year they were sampled
+
+points_df <-  st_drop_geometry(points_forb)
+
+points_climate <- points_df %>% 
+  select(PrimaryKey, b1_DayMet_climate_2022:Year) %>% 
+  pivot_longer(cols = b1_DayMet_climate_2022:b2_DayMet_climate_2011,
+             Groups_sep = "_",
+             Groups_to = c("Band", ".value", "Variable", "DayMetYear"))
+
+points_climate <-  points_climate[points_climate$Year == points_climate$DayMetYear,]
+
+points_climate <- points_climate %>% 
+  select(-c(Variable, DayMetYear)) %>% 
+  pivot_wider(id_cols = "PrimaryKey", Groups_from = "Band", values_from = "DayMet") 
+
+  points_climate <- points_climate %>% 
+    reGroup(Mean_daily_precip = b1,
+         Mean_daily_tmax = b2)
+
+points_climate <- merge(x = points_forb,
+                        y = points_climate,
+                        by = "PrimaryKey")
+
+
+hist(log(points_climate$Mean_daily_precip))
+hist(points_climate$Mean_daily_tmax)
+
+# some erroneous values
+points_climate <- points_climate[points_climate$Mean_daily_tmax > 0, ]
+
+ggplot(points_climate, aes(x = AH_ForbCover, y = Mean_daily_precip))+
+  geom_point()
+
+ggplot(points_climate, aes(x = AH_ForbCover, y = Mean_daily_tmax))+
+  geom_point()
+
+ggplot(points_climate, aes(x = PREFERRED, y = Mean_daily_precip, col = Mean_daily_tmax))+
+  geom_point()+
+  theme_bw(base_size = 16)+
+  scale_color_continuous(type = "viridis", Group = "Mean Daily Maximum Temperature (Celcius)")+
+  ylab("Mean Daily Precipitaiton (mm)")+
+  xlab("Preferred Forb Cover (%)")
+
+ggplot(points_climate, aes(x = AH_ForbCover, y = Mean_daily_tmax))+
+  geom_point()
+
+mod_food <- lm(points_climate$PREFERRED ~ points_climate$Mean_daily_precip)
+
+summary(mod_food)
+
+
+
+```
+
+```{r maps and figures}
+
+```
+
+```{r export}
+st_write(acec_fc_all_sf, dsn = "C:\\Users\\alaurencetraynor\\Documents\\Mojave Desert Tortoise\\acecs.shp")
+```
+
+
